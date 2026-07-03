@@ -1,0 +1,22 @@
+{
+	"FileVersion": 3,
+	"EngineAssociation": "{F1834111-461D-FF2F-8F2D-48B5EFBF238A}",
+	"Category": "",
+	"Description": "",
+	"Modules": [
+		{
+			"Name": "Left4Dead_DesertCity",
+			"Type": "Runtime",
+			"LoadingPhase": "Default"
+		}
+	],
+	"Plugins": [
+		{
+			"Name": "ModelingToolsEditorMode",
+			"Enabled": true,
+			"TargetAllowList": [
+				"Editor"
+			]
+		}
+	]
+}
