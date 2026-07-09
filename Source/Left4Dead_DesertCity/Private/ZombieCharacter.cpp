@@ -78,6 +78,7 @@ void AZombieCharacter::QualityMove(AActor* TargetActor)
 	if (CachedZombieAI)
 	{
 		// AIController의 MoveToActor 호출
+		CachedZombieAI->SetAIMode(EZombieAIMode::Quality);
 		CachedZombieAI->SetPerceptionEnabled(false);
 		CachedZombieAI->MoveToActor(
 			TargetActor,

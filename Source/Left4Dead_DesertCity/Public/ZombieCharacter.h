@@ -36,6 +36,9 @@ public:
 	void SimpleMove(FVector TargetLocation);
 	UFUNCTION(BlueprintCallable, Category = "Zombie|AI")
 	void QualityMove(AActor* TargetActor);
+
+	UFUNCTION(BlueprintImplementableEvent, Category = "Zombie|AI")
+	void OnQualityMoveNavLink(FVector StartLocation, FVector EndLocation);
 	
 	
 	// 2. 블루프린트에서 assign 가능한 델리게이트 변수

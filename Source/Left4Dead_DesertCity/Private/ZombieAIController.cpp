@@ -2,6 +2,7 @@
 
 #include "ZombieAIController.h"
 #include "ZombieCharacter.h"
+#include "ZombieCrowdFollowingComponent.h"
 #include "Navigation/CrowdFollowingComponent.h"
 #include "Perception/AIPerceptionComponent.h"
 #include "Perception/AISense.h"
@@ -10,7 +11,8 @@
 #include "Perception/AISense_Hearing.h"
 #include "Perception/AISense_Sight.h"
 
-AZombieAIController::AZombieAIController()
+AZombieAIController::AZombieAIController(const FObjectInitializer& ObjectInitializer)
+	: Super(ObjectInitializer.SetDefaultSubobjectClass<UZombieCrowdFollowingComponent>(TEXT("PathFollowingComponent")))
 {
 	CurrentMode = EZombieAIMode::Simple;
 
@@ -26,7 +28,7 @@ AZombieAIController::AZombieAIController()
 	if (SightConfig && ZombiePerceptionComponent)
 	{
 		SightConfig->SightRadius = sightRadius;
-		SightConfig->LoseSightRadius = sightRadius+500;
+		SightConfig->LoseSightRadius = sightRadius + 500.f;
 		SightConfig->PeripheralVisionAngleDegrees = 60.f;
 		SightConfig->SetMaxAge(5.f);
 		SightConfig->DetectionByAffiliation.bDetectEnemies = true;

@@ -32,7 +32,7 @@ class LEFT4DEAD_DESERTCITY_API AZombieAIController : public ADetourCrowdAIContro
 	
 
 public:
-	AZombieAIController();
+	AZombieAIController(const FObjectInitializer& ObjectInitializer = FObjectInitializer::Get());
 
 	
 	virtual void OnMoveCompleted(FAIRequestID RequestID, const FPathFollowingResult& Result) override;	
@@ -43,6 +43,9 @@ public:
 
 	UFUNCTION(BlueprintCallable, Category = "ZombieAI")
 	void SetPerceptionEnabled(bool bEnable);
+
+	UFUNCTION(BlueprintPure, Category = "ZombieAI")
+	EZombieAIMode GetCurrentMode() const { return CurrentMode; }
 
 	void SetCrowdAvoidanceEnabled(bool bEnable);
 
