@@ -82,7 +82,7 @@ void AZombieCharacter::QualityMove(AActor* TargetActor)
 		CachedZombieAI->SetPerceptionEnabled(false);
 		CachedZombieAI->MoveToActor(
 			TargetActor,
-			100.f,      // 슬롯 액터 주변 수용 반경
+			30.f,      // 슬롯 액터 주변 수용 반경
 			true,       // Use Pathfinding
 			true,       // Keep Goal Location Unchanged
 			true,       // Use Continuous Goal Tracking (실시간 추적 필수!)
@@ -145,6 +145,7 @@ void AZombieCharacter::OnSimpleMoveTargetReached()
 		OnMoveCompleted.Broadcast(this);
 	}
 }
+
 
 void AZombieCharacter::OnDespawnTimerExpired()
 {

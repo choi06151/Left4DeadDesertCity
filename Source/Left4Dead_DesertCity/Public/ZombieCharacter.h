@@ -56,6 +56,7 @@ public:
 	
 	
 	void OnSimpleMoveTargetReached();
+
 	
 protected:
 	// 지정된 시간이 지난 후 매니저의 Despawn을 호출할 내부 함수

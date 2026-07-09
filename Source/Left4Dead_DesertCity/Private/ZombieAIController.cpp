@@ -54,6 +54,7 @@ AZombieAIController::AZombieAIController(const FObjectInitializer& ObjectInitial
 		ZombiePerceptionComponent->OnTargetPerceptionUpdated.AddDynamic(
 			this,
 			&AZombieAIController::OnTargetPerceptionUpdated);
+		
 	}
 }
 
@@ -147,7 +148,7 @@ void AZombieAIController::OnMoveCompleted(FAIRequestID RequestID, const FPathFol
 {
 	Super::OnMoveCompleted(RequestID, Result);
 
-	if (CurrentMode == EZombieAIMode::Simple && Result.Code == EPathFollowingResult::Success)
+	if (Result.Code == EPathFollowingResult::Success)
 	{
 		if (AZombieCharacter* ZombieChar = Cast<AZombieCharacter>(GetPawn()))
 		{
