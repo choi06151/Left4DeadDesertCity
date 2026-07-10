@@ -1,113 +1,80 @@
-// Fill out your copyright notice in the Description page of Project Settings.
-
 #include "ZombieCrowdFollowingComponent.h"
+
+#include "NavLinkCustomInterface.h"
 #include "ZombieAIController.h"
 #include "ZombieCharacter.h"
-#include "NavMesh/NavMeshPath.h"
-#include "DrawDebugHelpers.h"
-
-void UZombieCrowdFollowingComponent::SetMoveSegment(int32 SegmentStartIndex)
-{
-
-	UE_LOG(LogTemp, Warning, TEXT("Segment : %d"), SegmentStartIndex);
-
-	const TArray<FNavPathPoint>& Points = Path->GetPathPoints();
-
-	UE_LOG(LogTemp, Warning, TEXT("Num : %d"), Points.Num());
-
-	UE_LOG(LogTemp, Warning, TEXT("IsNavLink : %d"),
-		FNavMeshNodeFlags(Points[SegmentStartIndex].Flags).IsNavLink());
-	
-	Super::SetMoveSegment(SegmentStartIndex);
-
-	if (Path.IsValid())
-	{
-		const TArray<FNavPathPoint>& PathPoints = Path->GetPathPoints();
-
-		for (int32 i = 0; i < PathPoints.Num() - 1; i++)
-		{
-			bool bIsNavLink =
-				FNavMeshNodeFlags(PathPoints[i].Flags).IsNavLink();
-
-			DrawDebugLine(
-				GetWorld(),
-				PathPoints[i].Location,
-				PathPoints[i + 1].Location,
-				bIsNavLink ? FColor::Yellow : FColor::Green,
-				false,
-				5.f,
-				0,
-				8.f
-			);
-		}
-		
-		for (int32 i = 0; i < PathPoints.Num() - 1; i++)
-		{
-			DrawDebugLine(
-				GetWorld(),
-				PathPoints[i].Location,
-				PathPoints[i + 1].Location,
-				FColor::Green,
-				false,      // Persistent
-				2.f,        // Duration
-				0,
-				5.f         // Thickness
-			);
-
-			DrawDebugSphere(
-				GetWorld(),
-				PathPoints[i].Location,
-				20.f,
-				12,
-				FColor::Red,
-				false,
-				2.f
-			);
-		}
-
-		// 마지막 점도 표시
-		DrawDebugSphere(
-			GetWorld(),
-			PathPoints.Last().Location,
-			20.f,
-			12,
-			FColor::Blue,
-			false,
-			2.f
-		);
-	}
-	
-	if (!Path.IsValid())
-	{
-		return;
-	}
-
-	const TArray<FNavPathPoint>& PathPoints = Path->GetPathPoints();
-	if (!PathPoints.IsValidIndex(SegmentStartIndex) || !PathPoints.IsValidIndex(SegmentStartIndex + 1))
-	{
-		return;
-	}
-
-	if (!FNavMeshNodeFlags(PathPoints[SegmentStartIndex].Flags).IsNavLink())
-	{
-		return;
-	}
-
-	NotifyQualityNavLink(PathPoints[SegmentStartIndex].Location, PathPoints[SegmentStartIndex + 1].Location);
-}
 
 void UZombieCrowdFollowingComponent::StartUsingCustomLink(INavLinkCustomInterface* CustomNavLink, const FVector& DestPoint)
 {
+	ActiveCustomNavLink = CustomNavLink;
 
 	Super::StartUsingCustomLink(CustomNavLink, DestPoint);
 
-	
-	const FVector StartLocation = MovementComp ? MovementComp->GetActorFeetLocation() : FVector::ZeroVector;
-	NotifyQualityNavLink(StartLocation, DestPoint);
+	FVector StartLocation = FVector::ZeroVector;
 
+	if (const AZombieAIController* ZombieAI = Cast<AZombieAIController>(GetOwner()))
+	{
+		if (const APawn* ZombiePawn = ZombieAI->GetPawn())
+		{
+			StartLocation = ZombiePawn->GetActorLocation();
+		}
+	}
+
+	NotifyQualityNavLink(BuildNavLinkContext(StartLocation, DestPoint));
 }
 
-void UZombieCrowdFollowingComponent::NotifyQualityNavLink(const FVector& StartLocation, const FVector& EndLocation)
+void UZombieCrowdFollowingComponent::FinishUsingCustomLink(INavLinkCustomInterface* CustomNavLink)
+{
+	Super::FinishUsingCustomLink(CustomNavLink);
+
+	if (ActiveCustomNavLink == CustomNavLink)
+	{
+		ActiveCustomNavLink = nullptr;
+	}
+}
+
+void UZombieCrowdFollowingComponent::FinishActiveCustomLink()
+{
+	if (ActiveCustomNavLink)
+	{
+		FinishUsingCustomLink(ActiveCustomNavLink);
+	}
+}
+
+EZombieSmartNavLinkType UZombieCrowdFollowingComponent::ResolveLinkType(
+	const FVector& StartLocation,
+	const FVector& EndLocation) const
+{
+	const float HeightDelta = EndLocation.Z - StartLocation.Z;
+
+	if (HeightDelta >= ClimbMinHeightDelta)
+	{
+		return EZombieSmartNavLinkType::Climb;
+	}
+
+	return EZombieSmartNavLinkType::Jump;
+}
+
+FZombieNavLinkContext UZombieCrowdFollowingComponent::BuildNavLinkContext(
+	const FVector& StartLocation,
+	const FVector& EndLocation) const
+{
+	FZombieNavLinkContext NavLinkContext;
+	NavLinkContext.StartLocation = StartLocation;
+	NavLinkContext.EndLocation = EndLocation;
+	NavLinkContext.MidLocation = (StartLocation + EndLocation) * 0.5f;
+
+	FVector HorizontalDirection = EndLocation - StartLocation;
+	HorizontalDirection.Z = 0.0f;
+	NavLinkContext.HorizontalDistance = HorizontalDirection.Size();
+	NavLinkContext.MoveDirection = HorizontalDirection.GetSafeNormal();
+	NavLinkContext.HeightDelta = EndLocation.Z - StartLocation.Z;
+	NavLinkContext.LinkType = ResolveLinkType(StartLocation, EndLocation);
+
+	return NavLinkContext;
+}
+
+void UZombieCrowdFollowingComponent::NotifyQualityNavLink(const FZombieNavLinkContext& NavLinkContext)
 {
 	AZombieAIController* ZombieAI = Cast<AZombieAIController>(GetOwner());
 	if (!ZombieAI || ZombieAI->GetCurrentMode() != EZombieAIMode::Quality)
@@ -117,7 +84,9 @@ void UZombieCrowdFollowingComponent::NotifyQualityNavLink(const FVector& StartLo
 
 	if (AZombieCharacter* ZombieChar = Cast<AZombieCharacter>(ZombieAI->GetPawn()))
 	{
-		UE_LOG(LogTemp, Log, TEXT("Quality NavLink triggered: %s -> %s"), *StartLocation.ToString(), *EndLocation.ToString());
-		ZombieChar->OnQualityMoveNavLink(StartLocation, EndLocation);
+		UE_LOG(LogTemp, Log, TEXT("Quality SmartLink triggered: %s -> %s"),
+			*NavLinkContext.StartLocation.ToString(),
+			*NavLinkContext.EndLocation.ToString());
+		ZombieChar->HandleQualityNavLink(NavLinkContext);
 	}
 }

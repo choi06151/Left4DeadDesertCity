@@ -33,6 +33,9 @@ public:
 	
 	UFUNCTION()
 	void OnZombieArrived(AZombieCharacter* ArrivedZombie);
+
+	bool IsSpawnLocationValid(const FVector& CandidateLocation, AZombieCharacter* TargetZombie) const;
+	bool IsSpawnLocationReachableToPlayer(const FVector& CandidateLocation) const;
 private:
 
 	
@@ -47,6 +50,15 @@ private:
 public:
 	UPROPERTY(VisibleAnywhere,BlueprintReadWrite)
 	int32 SpawnEnableZombieCount =2;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Zombie Spawn")
+	float SpawnMinDistance = 2500.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Zombie Spawn")
+	float SpawnMaxDistance = 5500.0f;
+	
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Zombie Spawn")
+	int32 SpawnMaxAttempts = 20;
 	
 	UPROPERTY()
 	int32 CurrentSpawnedZombieCount = 0;

@@ -4,6 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "DetourCrowdAIController.h"
+#include "ZombieStatsRow.h"
 #include "Navigation/PathFollowingComponent.h" 
 #include "Perception/AIPerceptionTypes.h"
 
@@ -48,6 +49,7 @@ public:
 	EZombieAIMode GetCurrentMode() const { return CurrentMode; }
 
 	void SetCrowdAvoidanceEnabled(bool bEnable);
+	void ApplyStatsRow(const FZombieStatsRow& StatsRow);
 
 	
 	
@@ -77,8 +79,17 @@ protected:
 	
 public:
 	UPROPERTY(VisibleAnywhere, BlueprintReadWrite, Category = "AI|Perception")
-	float sightRadius=2000.f;
+	float sightRadius=700.f;
 	
 	UPROPERTY(VisibleAnywhere, BlueprintReadWrite, Category = "AI|Perception")
-	float hearRadius=3000.f;
+	float hearRadius=900.f;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadWrite, Category = "AI|Perception")
+	float loseSightRadiusOffset = 500.0f;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadWrite, Category = "AI|Perception")
+	float peripheralVisionAngleDegrees = 60.0f;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadWrite, Category = "AI|Perception")
+	float sightMaxAge = 5.0f;
 };

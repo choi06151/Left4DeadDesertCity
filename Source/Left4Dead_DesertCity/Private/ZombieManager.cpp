@@ -1,13 +1,13 @@
-// Fill out your copyright notice in the Description page of Project Settings.
-
 #include "ZombieManager.h"
-#include "ZombieAIController.h"
-#include "ZombieCharacter.h"
-#include "Engine/World.h"
-#include "Kismet/GameplayStatics.h"
-#include "NavigationSystem.h"
+
 #include "Components/CapsuleComponent.h"
 #include "GameFramework/CharacterMovementComponent.h"
+#include "GameFramework/Pawn.h"
+#include "Kismet/GameplayStatics.h"
+#include "NavigationPath.h"
+#include "NavigationSystem.h"
+#include "ZombieAIController.h"
+#include "ZombieCharacter.h"
 
 AZombieManager::AZombieManager()
 {
@@ -45,7 +45,7 @@ void AZombieManager::InitializeZombies()
 	SpawnParams.Owner = this;
 	SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
 
-	const FVector InvisibleLocation(0.f, 0.f, -10000.f);
+	const FVector InvisibleLocation(0.0f, 0.0f, -10000.0f);
 	const FRotator SpawnRotation = FRotator::ZeroRotator;
 
 	for (int32 i = 0; i < SpawnEnableZombieCount; i++)
@@ -71,115 +71,108 @@ void AZombieManager::InitializeZombies()
 
 void AZombieManager::SpawnZombie()
 {
-    if (!Player || Zombies.Num() == 0) return;
+	if (!Player || Zombies.Num() == 0)
+	{
+		return;
+	}
 
-    // 1. 풀에서 현재 쉬고 있는(Hidden) 좀비 찾기
-    AZombieCharacter* TargetZombie = nullptr;
-    for (const TWeakObjectPtr<AZombieCharacter>& ZombiePtr : Zombies)
-    {
-       AZombieCharacter* Zombie = ZombiePtr.Get();
-       if (Zombie && Zombie->IsHidden())
-       {
-          TargetZombie = Zombie;
-          break; 
-       }
-    }
+	AZombieCharacter* TargetZombie = nullptr;
+	for (const TWeakObjectPtr<AZombieCharacter>& ZombiePtr : Zombies)
+	{
+		AZombieCharacter* Zombie = ZombiePtr.Get();
+		if (Zombie && Zombie->IsHidden())
+		{
+			TargetZombie = Zombie;
+			break;
+		}
+	}
 
-    if (!TargetZombie) return;
+	if (!TargetZombie)
+	{
+		return;
+	}
 
-    const FVector PlayerLocation = Player->GetActorLocation();
-    FVector SpawnLocation = FVector::ZeroVector; // 초기값을 제로로 설정하여 성공 여부 판별
-    bool bSpatialQuerySuccess = false;
+	const FVector PlayerLocation = Player->GetActorLocation();
+	FVector SpawnLocation = FVector::ZeroVector;
+	bool bSpatialQuerySuccess = false;
 
-    if (UNavigationSystemV1* NavSys = FNavigationSystem::GetCurrent<UNavigationSystemV1>(GetWorld()))
-    {
-	    // 2D 평면상에서 15m ~ 25m 사이의 균일한 랜덤 좌표 오프셋 계산 (VRand 오차 수정)
-    	const float RandomRange = FMath::FRandRange(3500.f, 5500.f);
-    	const FVector2D RandomCirclePoint = FMath::RandPointInCircle(RandomRange);
-    	const FVector RandomOffset = FVector(RandomCirclePoint.X, RandomCirclePoint.Y, 0.f);
+	if (UNavigationSystemV1* NavSys = FNavigationSystem::GetCurrent<UNavigationSystemV1>(GetWorld()))
+	{
+		for (int32 Try = 0; Try < SpawnMaxAttempts; ++Try)
+		{
+			const float RandomAngleRadians = FMath::FRandRange(0.0f, 2.0f * PI);
+			const float RandomDistance = FMath::FRandRange(SpawnMinDistance, SpawnMaxDistance);
+			const FVector2D RandomDirection(FMath::Cos(RandomAngleRadians), FMath::Sin(RandomAngleRadians));
+			const FVector DesiredLocation = PlayerLocation + FVector(RandomDirection.X * RandomDistance, RandomDirection.Y * RandomDistance, 0.0f);
 
-    	const FVector DesiredLocation = PlayerLocation + RandomOffset;
-    	FNavLocation ProjectedLocation;
+			FNavLocation ProjectedLocation;
+			if (!NavSys->ProjectPointToNavigation(DesiredLocation, ProjectedLocation, FVector(500.0f, 500.0f, 300.0f)))
+			{
+				continue;
+			}
 
-    	for (int32 Try = 0; Try < 10; ++Try)
-    	{
-    		// 수직 오차 검사 반경을 500에서 300 정도로 좁혀서 위아래 층간 간섭 최소화
-    		if (NavSys->ProjectPointToNavigation(DesiredLocation, ProjectedLocation, FVector(500.f, 500.f, 300.f)))
-    		{
-    			SpawnLocation = ProjectedLocation.Location;
-    			bSpatialQuerySuccess = true;
+			FHitResult Hit;
+			const FVector TraceStart = ProjectedLocation.Location + FVector(0.0f, 0.0f, 1000.0f);
+			const FVector TraceEnd = ProjectedLocation.Location - FVector(0.0f, 0.0f, 50000.0f);
 
-    			// 위에서 아래로 바닥 검증
-    			FHitResult Hit;
+			FCollisionQueryParams Params(SCENE_QUERY_STAT(ZombieSpawnTrace), true);
+			Params.AddIgnoredActor(TargetZombie);
 
-    			const FVector TraceStart = SpawnLocation + FVector(0.f, 0.f, 0.f);
-    			const FVector TraceEnd   = SpawnLocation - FVector(0.f, 0.f, 50000.f);
+			const bool bHit = GetWorld()->LineTraceSingleByChannel(
+				Hit,
+				TraceStart,
+				TraceEnd,
+				ECC_WorldStatic,
+				Params
+			);
 
-    			FCollisionQueryParams Params;
-    			Params.bTraceComplex = true;      // 메시의 실제 표면 기준
-    			Params.AddIgnoredActor(TargetZombie);
+			if (!bHit)
+			{
+				continue;
+			}
 
-    			bool bHit = GetWorld()->LineTraceSingleByChannel(
-					Hit,
-					TraceStart,
-					TraceEnd,
-					ECC_WorldStatic,
-					Params
-				);
+			SpawnLocation = Hit.Location;
 
-    			
+			if (!IsSpawnLocationValid(SpawnLocation, TargetZombie))
+			{
+				continue;
+			}
 
-    			// 실제 바닥 위치로 보정
-    			SpawnLocation = Hit.Location;
+			bSpatialQuerySuccess = true;
+			break;
+		}
+	}
 
-    			if (!bHit)
-    			{
-    				UE_LOG(LogTemp, Warning, TEXT("스폰 위치 검증 실패 - 바닥을 찾지 못함"));
-    			
-    			}
-			    else
-			    {
-				    break;
-			    }
-    		}
-    	}
-    
-    	
-    }
+	if (!bSpatialQuerySuccess)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("Zombie spawn validation failed after %d attempts."), SpawnMaxAttempts);
+		return;
+	}
 
-    // 내비메시 검색에 완전히 실패했다면, 플레이어와 겹치게 강제 소환하는 대신 이번 루프는 안전하게 스킵
-    if (!bSpatialQuerySuccess)
-    {
-       UE_LOG(LogTemp, Warning, TEXT("좀비 스폰 위치의 NavMesh 투영에 실패했습니다."));
-       return;
-    }
+	if (UCapsuleComponent* Capsule = TargetZombie->GetCapsuleComponent())
+	{
+		SpawnLocation.Z += Capsule->GetScaledCapsuleHalfHeight();
+	}
 
-    // 발바닥 정렬을 위한 캡슐 높이 보정
-    if (UCapsuleComponent* Capsule = TargetZombie->GetCapsuleComponent())
-    {
-       SpawnLocation.Z += Capsule->GetScaledCapsuleHalfHeight();
-    }  
-    
-    // 위치 설정 및 액터 활성화
-    TargetZombie->SetActorLocationAndRotation(SpawnLocation, FRotator::ZeroRotator);
-    TargetZombie->SetActorHiddenInGame(false);
-    TargetZombie->SetActorEnableCollision(true);
-    
-    // 캐릭터 무브먼트 초기화 (공중 부양 및 속도 꼬임 방지)
-    if (UCharacterMovementComponent* MoveComp = TargetZombie->GetCharacterMovement())
-    {
-       MoveComp->Velocity = FVector::ZeroVector;
-       MoveComp->SetMovementMode(MOVE_Walking);
-    }
-	
+	TargetZombie->SetActorLocationAndRotation(SpawnLocation, FRotator::ZeroRotator);
+	TargetZombie->SetActorHiddenInGame(false);
+	TargetZombie->SetActorEnableCollision(true);
+
+	if (UCharacterMovementComponent* MoveComp = TargetZombie->GetCharacterMovement())
+	{
+		MoveComp->Velocity = FVector::ZeroVector;
+		MoveComp->SetMovementMode(MOVE_Walking);
+		MoveComp->SetComponentTickEnabled(true);
+	}
+
 	TargetZombie->ZombieActivateSet();
+	TargetZombie->LaunchTowardActor(Player);
 
-    // AI 기동 및 돌격 명령
-    if (AZombieAIController* AICon = Cast<AZombieAIController>(TargetZombie->GetController()))
-    {
-       AICon->SetAIMode(EZombieAIMode::Simple);
-       TargetZombie->SimpleMove(PlayerLocation);
-    }
+	if (AZombieAIController* AICon = Cast<AZombieAIController>(TargetZombie->GetController()))
+	{
+		AICon->SetAIMode(EZombieAIMode::Simple);
+		TargetZombie->SimpleMove(PlayerLocation);
+	}
 }
 
 void AZombieManager::DeSpawnZombie(AZombieCharacter* Zombie)
@@ -191,7 +184,7 @@ void AZombieManager::DeSpawnZombie(AZombieCharacter* Zombie)
 
 	Zombie->SetActorHiddenInGame(true);
 	Zombie->SetActorEnableCollision(false);
-	Zombie->SetActorLocation(FVector(0.f, 0.f, -10000.f));
+	Zombie->SetActorLocation(FVector(0.0f, 0.0f, -10000.0f));
 }
 
 void AZombieManager::OnZombieArrived(AZombieCharacter* ArrivedZombie)
@@ -203,7 +196,7 @@ void AZombieManager::OnZombieArrived(AZombieCharacter* ArrivedZombie)
 
 	const float Distance = FVector::Dist(ArrivedZombie->GetActorLocation(), Player->GetActorLocation());
 
-	if (Distance <= 1000.f)
+	if (Distance <= ArrivedZombie->QualityEnterDistance)
 	{
 		if (AZombieAIController* AICon = Cast<AZombieAIController>(ArrivedZombie->GetController()))
 		{
@@ -215,4 +208,39 @@ void AZombieManager::OnZombieArrived(AZombieCharacter* ArrivedZombie)
 	}
 
 	ArrivedZombie->SimpleMove(Player->GetActorLocation());
+}
+
+bool AZombieManager::IsSpawnLocationValid(const FVector& CandidateLocation, AZombieCharacter* TargetZombie) const
+{
+	if (!Player)
+	{
+		return false;
+	}
+
+	const FVector PlayerLocation = Player->GetActorLocation();
+	const FVector ToSpawn = CandidateLocation - PlayerLocation;
+	const float DistanceToPlayer = ToSpawn.Size2D();
+	if (DistanceToPlayer < SpawnMinDistance || DistanceToPlayer > SpawnMaxDistance)
+	{
+		return false;
+	}
+
+	return IsSpawnLocationReachableToPlayer(CandidateLocation);
+}
+
+bool AZombieManager::IsSpawnLocationReachableToPlayer(const FVector& CandidateLocation) const
+{
+	if (!Player || !GetWorld())
+	{
+		return false;
+	}
+
+	const UNavigationPath* NavPath = UNavigationSystemV1::FindPathToLocationSynchronously(
+		GetWorld(),
+		CandidateLocation,
+		Player->GetActorLocation(),
+		Player
+	);
+
+	return NavPath && NavPath->IsValid() && !NavPath->IsPartial();
 }

@@ -1,8 +1,5 @@
-// Fill out your copyright notice in the Description page of Project Settings.
-
 #include "ZombieAIController.h"
-#include "ZombieCharacter.h"
-#include "ZombieCrowdFollowingComponent.h"
+
 #include "Navigation/CrowdFollowingComponent.h"
 #include "Perception/AIPerceptionComponent.h"
 #include "Perception/AISense.h"
@@ -10,6 +7,8 @@
 #include "Perception/AISenseConfig_Sight.h"
 #include "Perception/AISense_Hearing.h"
 #include "Perception/AISense_Sight.h"
+#include "ZombieCharacter.h"
+#include "ZombieCrowdFollowingComponent.h"
 
 AZombieAIController::AZombieAIController(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer.SetDefaultSubobjectClass<UZombieCrowdFollowingComponent>(TEXT("PathFollowingComponent")))
@@ -28,9 +27,9 @@ AZombieAIController::AZombieAIController(const FObjectInitializer& ObjectInitial
 	if (SightConfig && ZombiePerceptionComponent)
 	{
 		SightConfig->SightRadius = sightRadius;
-		SightConfig->LoseSightRadius = sightRadius + 500.f;
-		SightConfig->PeripheralVisionAngleDegrees = 60.f;
-		SightConfig->SetMaxAge(5.f);
+		SightConfig->LoseSightRadius = sightRadius + 500.0f;
+		SightConfig->PeripheralVisionAngleDegrees = 60.0f;
+		SightConfig->SetMaxAge(5.0f);
 		SightConfig->DetectionByAffiliation.bDetectEnemies = true;
 		SightConfig->DetectionByAffiliation.bDetectFriendlies = true;
 		SightConfig->DetectionByAffiliation.bDetectNeutrals = true;
@@ -54,7 +53,6 @@ AZombieAIController::AZombieAIController(const FObjectInitializer& ObjectInitial
 		ZombiePerceptionComponent->OnTargetPerceptionUpdated.AddDynamic(
 			this,
 			&AZombieAIController::OnTargetPerceptionUpdated);
-		
 	}
 }
 
@@ -64,6 +62,33 @@ void AZombieAIController::BeginPlay()
 
 	SetPerceptionEnabled(false);
 	SetCrowdAvoidanceEnabled(false);
+}
+
+void AZombieAIController::ApplyStatsRow(const FZombieStatsRow& StatsRow)
+{
+	sightRadius = StatsRow.SightRadius;
+	hearRadius = StatsRow.HearRadius;
+	loseSightRadiusOffset = StatsRow.LoseSightRadiusOffset;
+	peripheralVisionAngleDegrees = StatsRow.PeripheralVisionAngleDegrees;
+	sightMaxAge = StatsRow.SightMaxAge;
+
+	if (SightConfig)
+	{
+		SightConfig->SightRadius = sightRadius;
+		SightConfig->LoseSightRadius = sightRadius + loseSightRadiusOffset;
+		SightConfig->PeripheralVisionAngleDegrees = peripheralVisionAngleDegrees;
+		SightConfig->SetMaxAge(sightMaxAge);
+	}
+
+	if (HearingConfig)
+	{
+		HearingConfig->HearingRange = hearRadius;
+	}
+
+	if (ZombiePerceptionComponent)
+	{
+		ZombiePerceptionComponent->RequestStimuliListenerUpdate();
+	}
 }
 
 void AZombieAIController::OnTargetPerceptionUpdated(AActor* Actor, FAIStimulus Stimulus)
@@ -77,6 +102,10 @@ void AZombieAIController::OnTargetPerceptionUpdated(AActor* Actor, FAIStimulus S
 	{
 		return;
 	}
+	
+	
+	if (!Actor->ActorHasTag("Player"))
+		return;
 
 	AZombieCharacter* ZombieChar = Cast<AZombieCharacter>(GetPawn());
 	if (!ZombieChar)
@@ -136,10 +165,14 @@ void AZombieAIController::SetCrowdAvoidanceEnabled(bool bEnable)
 
 	if (bEnable)
 	{
+		CrowdFollowComp->SetCrowdSimulationState(ECrowdSimulationState::Enabled);
+		CrowdFollowComp->SuspendCrowdSteering(false);
 		CrowdFollowComp->SetCrowdAvoidanceQuality(ECrowdAvoidanceQuality::Good);
 	}
 	else
 	{
+		CrowdFollowComp->SuspendCrowdSteering(true);
+		CrowdFollowComp->SetCrowdSimulationState(ECrowdSimulationState::Disabled);
 		CrowdFollowComp->SetCrowdAvoidanceQuality(ECrowdAvoidanceQuality::Low);
 	}
 }
@@ -148,11 +181,15 @@ void AZombieAIController::OnMoveCompleted(FAIRequestID RequestID, const FPathFol
 {
 	Super::OnMoveCompleted(RequestID, Result);
 
-	if (Result.Code == EPathFollowingResult::Success)
+	if (AZombieCharacter* ZombieChar = Cast<AZombieCharacter>(GetPawn()))
 	{
-		if (AZombieCharacter* ZombieChar = Cast<AZombieCharacter>(GetPawn()))
+		if (CurrentMode == EZombieAIMode::Simple)
 		{
-			ZombieChar->OnSimpleMoveTargetReached();
+			ZombieChar->OnSimpleMoveFinished(Result.Code);
+		}
+		else
+		{
+			ZombieChar->OnQualityMoveFinished(Result.Code);
 		}
 	}
 }
