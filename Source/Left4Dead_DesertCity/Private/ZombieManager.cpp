@@ -151,6 +151,12 @@ void AZombieManager::SpawnZombie()
 
 	if (UCapsuleComponent* Capsule = TargetZombie->GetCapsuleComponent())
 	{
+		// DisableZombieActor clears every response for pooling, so restore the
+		// active collision profile before showing or launching the zombie again.
+		Capsule->SetCollisionProfileName(TEXT("Pawn"));
+		Capsule->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
+		Capsule->SetCollisionObjectType(ECC_GameTraceChannel3);
+		Capsule->SetCollisionResponseToChannel(ECC_GameTraceChannel3, ECR_Overlap);
 		SpawnLocation.Z += Capsule->GetScaledCapsuleHalfHeight();
 	}
 
@@ -243,4 +249,50 @@ bool AZombieManager::IsSpawnLocationReachableToPlayer(const FVector& CandidateLo
 	);
 
 	return NavPath && NavPath->IsValid() && !NavPath->IsPartial();
+}
+
+FVector AZombieManager::GetSurroundSlotLocation(
+	const AZombieCharacter* Zombie,
+	const FVector& TargetCenter) const
+{
+	if (!Zombie)
+	{
+		return TargetCenter;
+	}
+
+	int32 ZombieIndex = INDEX_NONE;
+	for (int32 Index = 0; Index < Zombies.Num(); ++Index)
+	{
+		if (Zombies[Index].Get() == Zombie)
+		{
+			ZombieIndex = Index;
+			break;
+		}
+	}
+
+	if (ZombieIndex == INDEX_NONE)
+	{
+		return TargetCenter;
+	}
+
+	const int32 SlotsPerRing = FMath::Max(1, SurroundSlotsPerRing);
+	const int32 RingIndex = ZombieIndex / SlotsPerRing;
+	const float Radius = FMath::Max(0.0f, SurroundBaseRadius + RingIndex * SurroundRingSpacing);
+
+	// Golden-angle distribution keeps even the first few active pool entries
+	// spread around the full circle while preserving a stable slot per zombie.
+	constexpr float GoldenAngleRadians = PI * (3.0f - 2.2360679775f);
+	const float Angle = ZombieIndex * GoldenAngleRadians;
+	const FVector DesiredLocation = TargetCenter + FVector(FMath::Cos(Angle), FMath::Sin(Angle), 0.0f) * Radius;
+
+	if (UNavigationSystemV1* NavSys = FNavigationSystem::GetCurrent<UNavigationSystemV1>(GetWorld()))
+	{
+		FNavLocation ProjectedLocation;
+		if (NavSys->ProjectPointToNavigation(DesiredLocation, ProjectedLocation, SurroundNavProjectionExtent))
+		{
+			return ProjectedLocation.Location;
+		}
+	}
+
+	return DesiredLocation;
 }

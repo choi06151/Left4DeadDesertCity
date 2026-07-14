@@ -1,6 +1,7 @@
 #include "ZombieCharacter.h"
 
 #include "Components/CapsuleComponent.h"
+#include "Components/SkeletalMeshComponent.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "Kismet/GameplayStatics.h"
 #include "NavigationSystem.h"
@@ -22,7 +23,21 @@ void AZombieCharacter::BeginPlay()
 
 	CachedZombieAI = Cast<AZombieAIController>(GetController());
 	LoadStatsFromDataTable();
+	ConfigureActiveCollision();
 	SetActorTickEnabled(false);
+}
+
+void AZombieCharacter::ConfigureActiveCollision()
+{
+	if (UCapsuleComponent* Capsule = GetCapsuleComponent())
+	{
+		// Restore the profile after pooling, then overlap only other zombies so
+		// hordes cannot physically deadlock. Players and world geometry still block.
+		Capsule->SetCollisionProfileName(TEXT("Pawn"));
+		Capsule->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
+		Capsule->SetCollisionObjectType(ECC_GameTraceChannel3);
+		Capsule->SetCollisionResponseToChannel(ECC_GameTraceChannel3, ECR_Overlap);
+	}
 }
 
 void AZombieCharacter::ApplyStatsRow(const FZombieStatsRow& StatsRow)
@@ -99,6 +114,11 @@ void AZombieCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputCom
 
 void AZombieCharacter::SimpleMove(FVector TargetLocation)
 {
+	SimpleMoveInternal(TargetLocation, true);
+}
+
+void AZombieCharacter::SimpleMoveInternal(FVector TargetLocation, bool bResetRecoveryAttempt)
+{
 	if (!CachedZombieAI)
 	{
 		CachedZombieAI = Cast<AZombieAIController>(GetController());
@@ -109,17 +129,27 @@ void AZombieCharacter::SimpleMove(FVector TargetLocation)
 		return;
 	}
 
+	if (const AZombieManager* Manager = Cast<AZombieManager>(GetOwner()))
+	{
+		TargetLocation = Manager->GetSurroundSlotLocation(this, TargetLocation);
+	}
+
 	QualityTargetActor = nullptr;
+	bIsAttacking = false;
 	LastSimpleTargetLocation = TargetLocation;
 	LastSimpleObservedLocation = GetActorLocation();
 	ConsecutiveSimpleStuckCount = 0;
-	SimpleStuckRecoveryAttemptCount = 0;
+	if (bResetRecoveryAttempt)
+	{
+		SimpleStuckRecoveryAttemptCount = 0;
+	}
 	LastSimpleMoveRequestTime = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.0f;
 	ForcedQualityUntilTime = 0.0f;
 	bIsUsingQualityNavLink = false;
 	bIgnoreNextQualityMoveFinished = false;
 	ResetQualityStuckTracking();
 	ResetRepeatedNavLinkTracking();
+	ConfigureActiveCollision();
 	SetActorTickEnabled(false);
 	CachedZombieAI->SetAIMode(EZombieAIMode::Simple);
 	CachedZombieAI->SetPerceptionEnabled(true);
@@ -152,6 +182,8 @@ void AZombieCharacter::QualityMove(AActor* TargetActor)
 	}
 
 	QualityTargetActor = TargetActor;
+	bIsAttacking = false;
+	ConfigureActiveCollision();
 	SetActorTickEnabled(true);
 	StopSimpleStuckCheck();
 	bIsUsingQualityNavLink = false;
@@ -159,6 +191,7 @@ void AZombieCharacter::QualityMove(AActor* TargetActor)
 	CachedZombieAI->SetAIMode(EZombieAIMode::Quality);
 	CachedZombieAI->SetPerceptionEnabled(false);
 	ResetQualityStuckTracking();
+	QualityStuckGraceUntilTime = (GetWorld() ? GetWorld()->GetTimeSeconds() : 0.0f) + QualityStuckGracePeriod;
 	ResetRepeatedNavLinkTracking();
 	LastQualityObservedLocation = GetActorLocation();
 	RequestQualityRepath(true);
@@ -182,12 +215,93 @@ void AZombieCharacter::FinishQualityMoveNavLink()
 		CrowdFollowComp->FinishActiveCustomLink();
 	}
 
-	TryRecoverOffNavAfterNavLink();
+	TryRelocateFromNavLinkCollision();
+
+	if (TryRecoverOffNavAfterNavLink())
+	{
+		return;
+	}
+
 	ResumeQualityChaseAfterNavLink();
+}
+
+bool AZombieCharacter::IsCapsuleOverlappingBlockingGeometry(const FVector& Location) const
+{
+	UWorld* World = GetWorld();
+	const UCapsuleComponent* Capsule = GetCapsuleComponent();
+	if (!World || !Capsule)
+	{
+		return false;
+	}
+
+	// Shrink slightly so touching the floor or a wall is not treated as penetration.
+	const float Radius = FMath::Max(1.0f, Capsule->GetScaledCapsuleRadius() - 2.0f);
+	const float HalfHeight = FMath::Max(Radius, Capsule->GetScaledCapsuleHalfHeight() - 2.0f);
+	const FCollisionShape CapsuleShape = FCollisionShape::MakeCapsule(Radius, HalfHeight);
+
+	FCollisionQueryParams QueryParams(SCENE_QUERY_STAT(ZombieNavLinkCollisionRecovery), false, this);
+	return World->OverlapBlockingTestByChannel(
+		Location,
+		GetActorQuat(),
+		Capsule->GetCollisionObjectType(),
+		CapsuleShape,
+		QueryParams);
+}
+
+bool AZombieCharacter::TryRelocateFromNavLinkCollision()
+{
+	if (!IsCapsuleOverlappingBlockingGeometry(GetActorLocation()))
+	{
+		return false;
+	}
+
+	UNavigationSystemV1* NavSys = FNavigationSystem::GetCurrent<UNavigationSystemV1>(GetWorld());
+	UCapsuleComponent* Capsule = GetCapsuleComponent();
+	if (!NavSys || !Capsule)
+	{
+		return false;
+	}
+
+	const FVector SearchOrigin = bHasQualityNavLinkContext
+		? LastNavLinkContext.EndLocation
+		: GetActorLocation();
+	const int32 AttemptCount = FMath::Max(1, NavLinkCollisionRecoveryAttempts);
+
+	for (int32 Attempt = 0; Attempt < AttemptCount; ++Attempt)
+	{
+		FNavLocation ReachableLocation;
+		if (!NavSys->GetRandomReachablePointInRadius(SearchOrigin, NavLinkCollisionRecoveryRadius, ReachableLocation))
+		{
+			continue;
+		}
+
+		FVector CandidateLocation = ReachableLocation.Location;
+		CandidateLocation.Z += Capsule->GetScaledCapsuleHalfHeight();
+		if (IsCapsuleOverlappingBlockingGeometry(CandidateLocation))
+		{
+			continue;
+		}
+
+		SetActorLocation(CandidateLocation, false, nullptr, ETeleportType::TeleportPhysics);
+		if (UCharacterMovementComponent* MoveComp = GetCharacterMovement())
+		{
+			MoveComp->StopMovementImmediately();
+		}
+
+		UE_LOG(LogTemp, Warning, TEXT("Zombie relocated after NavLink collision: %s"),
+			*CandidateLocation.ToString());
+		return true;
+	}
+
+	UE_LOG(LogTemp, Warning, TEXT("Zombie NavLink collision recovery could not find a clear NavMesh location."));
+	return false;
 }
 
 void AZombieCharacter::HandleQualityNavLink(const FZombieNavLinkContext& NavLinkContext)
 {
+	bHasQualityNavLinkContext = true;
+	bQualityNavLinkRecoveryTriggered = false;
+
 	const bool bIsSameLink =
 		FVector::DistSquared(NavLinkContext.StartLocation, LastNavLinkStartLocation) <= FMath::Square(RepeatedNavLinkLocationTolerance) &&
 		FVector::DistSquared(NavLinkContext.EndLocation, LastNavLinkEndLocation) <= FMath::Square(RepeatedNavLinkLocationTolerance);
@@ -236,6 +350,15 @@ void AZombieCharacter::ZombieDeActivateSet()
 {
 	StopSimpleStuckCheck();
 	DisableZombieActor();
+
+	// The corpse mesh uses the Ragdoll object type. Explicitly ignore both the
+	// player Pawn channel and the custom Zombie channel while keeping world
+	// collision enabled so the body can still settle on the floor.
+	if (USkeletalMeshComponent* MeshComp = GetMesh())
+	{
+		MeshComp->SetCollisionResponseToChannel(ECC_Pawn, ECR_Ignore);
+		MeshComp->SetCollisionResponseToChannel(ECC_GameTraceChannel3, ECR_Ignore);
+	}
 
 	GetWorldTimerManager().SetTimer(
 		DespawnTimerHandle,
@@ -341,6 +464,11 @@ void AZombieCharacter::UpdateQualityChase(float DeltaTime)
 		return;
 	}
 
+	if (bIsAttacking)
+	{
+		return;
+	}
+
 	AActor* TargetActor = QualityTargetActor.Get();
 	if (!TargetActor)
 	{
@@ -349,6 +477,11 @@ void AZombieCharacter::UpdateQualityChase(float DeltaTime)
 	}
 
 	const float DistanceToTarget = FVector::Dist(GetActorLocation(), TargetActor->GetActorLocation());
+	if (DistanceToTarget <= AttackRange)
+	{
+		StartZombieAttack(TargetActor);
+		return;
+	}
 
 	if (ShouldSwitchToSimpleMode())
 	{
@@ -358,6 +491,62 @@ void AZombieCharacter::UpdateQualityChase(float DeltaTime)
 
 	HandleQualityStuck(DeltaTime, DistanceToTarget);
 	RequestQualityRepath(false);
+}
+
+void AZombieCharacter::StartZombieAttack(AActor* TargetActor)
+{
+	if (bIsAttacking || !TargetActor || bIsUsingQualityNavLink)
+	{
+		return;
+	}
+
+	bIsAttacking = true;
+	QualityTargetActor = TargetActor;
+	ResetQualityStuckTracking();
+
+	if (CachedZombieAI)
+	{
+		CachedZombieAI->StopMovement();
+	}
+
+	if (UCharacterMovementComponent* MoveComp = GetCharacterMovement())
+	{
+		MoveComp->StopMovementImmediately();
+	}
+
+	OnZombieAttack(TargetActor);
+}
+
+void AZombieCharacter::FinishZombieAttack()
+{
+	if (!bIsAttacking)
+	{
+		return;
+	}
+
+	bIsAttacking = false;
+
+	AActor* TargetActor = QualityTargetActor.Get();
+	if (!TargetActor)
+	{
+		TargetActor = UGameplayStatics::GetPlayerPawn(this, 0);
+	}
+
+	if (!TargetActor || !CachedZombieAI)
+	{
+		QualityTargetActor = nullptr;
+		SetActorTickEnabled(false);
+		return;
+	}
+
+	const float DistanceToTarget = FVector::Dist(GetActorLocation(), TargetActor->GetActorLocation());
+	if (DistanceToTarget <= AttackRange)
+	{
+		StartZombieAttack(TargetActor);
+		return;
+	}
+
+	QualityMove(TargetActor);
 }
 
 void AZombieCharacter::RequestQualityRepath(bool bForceRepath)
@@ -373,7 +562,11 @@ void AZombieCharacter::RequestQualityRepath(bool bForceRepath)
 		return;
 	}
 
-	const FVector CurrentGoalLocation = TargetActor->GetActorLocation();
+	FVector CurrentGoalLocation = TargetActor->GetActorLocation();
+	if (const AZombieManager* Manager = Cast<AZombieManager>(GetOwner()))
+	{
+		CurrentGoalLocation = Manager->GetSurroundSlotLocation(this, CurrentGoalLocation);
+	}
 	const float DistanceToTarget = FVector::Dist(GetActorLocation(), CurrentGoalLocation);
 	const float CurrentTime = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.0f;
 	const float RepathDistance = GetQualityRepathDistanceForDistance(DistanceToTarget);
@@ -390,13 +583,12 @@ void AZombieCharacter::RequestQualityRepath(bool bForceRepath)
 	LastQualityGoalLocation = CurrentGoalLocation;
 	LastQualityRepathTime = CurrentTime;
 
-	CachedZombieAI->MoveToActor(
-		TargetActor,
+	CachedZombieAI->MoveToLocation(
+		CurrentGoalLocation,
 		30.0f,
 		true,
 		true,
 		false,
-		nullptr,
 		true
 	);
 }
@@ -557,7 +749,7 @@ void AZombieCharacter::HandleSimpleStuck()
 	if (PlayerActor && SimpleStuckRecoveryAttemptCount == 0)
 	{
 		++SimpleStuckRecoveryAttemptCount;
-		SimpleMove(PlayerActor->GetActorLocation());
+		SimpleMoveInternal(PlayerActor->GetActorLocation(), false);
 		return;
 	}
 
@@ -577,11 +769,14 @@ void AZombieCharacter::ResetRepeatedNavLinkTracking()
 	LastNavLinkStartLocation = FVector::ZeroVector;
 	LastNavLinkEndLocation = FVector::ZeroVector;
 	LastNavLinkContext = FZombieNavLinkContext();
+	bHasQualityNavLinkContext = false;
+	bQualityNavLinkRecoveryTriggered = false;
 }
 
 void AZombieCharacter::DisableZombieActor()
 {
 	StopSimpleStuckCheck();
+	bIsAttacking = false;
 
 	if (AZombieAIController* AICon = Cast<AZombieAIController>(GetController()))
 	{
@@ -615,6 +810,7 @@ void AZombieCharacter::ResumeQualityChaseAfterNavLink()
 	}
 
 	ResetQualityStuckTracking();
+	QualityStuckGraceUntilTime = (GetWorld() ? GetWorld()->GetTimeSeconds() : 0.0f) + QualityStuckGracePeriod;
 	RequestQualityRepath(true);
 }
 
@@ -627,7 +823,7 @@ void AZombieCharacter::HandleQualityStuck(float DeltaTime, float DistanceToTarge
 	}
 
 	const float CurrentTime = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.0f;
-	if ((CurrentTime - LastQualityRepathTime) < QualityStuckGracePeriod)
+	if (CurrentTime < QualityStuckGraceUntilTime)
 	{
 		ResetQualityStuckTracking();
 		return;
@@ -653,8 +849,25 @@ void AZombieCharacter::HandleQualityStuck(float DeltaTime, float DistanceToTarge
 	}
 
 	QualityStuckTime = 0.0f;
+
+	if (bHasQualityNavLinkContext &&
+		FVector::DistSquared2D(GetActorLocation(), LastNavLinkContext.EndLocation) <=
+		FMath::Square(RepeatedNavLinkLocationTolerance))
+	{
+		bIsUsingQualityNavLink = true;
+		bIgnoreNextQualityMoveFinished = true;
+		if (TriggerQualityNavLinkRecovery())
+		{
+			return;
+		}
+
+		bIsUsingQualityNavLink = false;
+		bIgnoreNextQualityMoveFinished = false;
+	}
+
 	LaunchOutOfQualityStuck();
 	CachedZombieAI->StopMovement();
+	QualityStuckGraceUntilTime = CurrentTime + QualityStuckGracePeriod;
 	RequestQualityRepath(true);
 }
 
@@ -671,12 +884,12 @@ void AZombieCharacter::LaunchOutOfQualityStuck()
 	LaunchCharacter(LaunchVelocity, true, true);
 }
 
-void AZombieCharacter::TryRecoverOffNavAfterNavLink()
+bool AZombieCharacter::TryRecoverOffNavAfterNavLink()
 {
 	UNavigationSystemV1* NavSys = FNavigationSystem::GetCurrent<UNavigationSystemV1>(GetWorld());
 	if (!NavSys)
 	{
-		return;
+		return false;
 	}
 
 	FNavLocation ProjectedLocation;
@@ -688,7 +901,7 @@ void AZombieCharacter::TryRecoverOffNavAfterNavLink()
 
 	if (ForwardDirection.IsNearlyZero())
 	{
-		return;
+		return false;
 	}
 
 	const bool bNeedsJumpFinishNudge =
@@ -697,7 +910,12 @@ void AZombieCharacter::TryRecoverOffNavAfterNavLink()
 
 	if (bIsOnNav && !bNeedsJumpFinishNudge)
 	{
-		return;
+		return false;
+	}
+
+	if (TriggerQualityNavLinkRecovery())
+	{
+		return true;
 	}
 
 	float ForwardStrength = NavLinkOffNavRecoveryForwardStrength;
@@ -714,6 +932,25 @@ void AZombieCharacter::TryRecoverOffNavAfterNavLink()
 		(FVector::UpVector * UpStrength);
 
 	LaunchCharacter(RecoveryLaunchVelocity, true, true);
+	return false;
+}
+
+bool AZombieCharacter::TriggerQualityNavLinkRecovery()
+{
+	if (!bHasQualityNavLinkContext || bQualityNavLinkRecoveryTriggered)
+	{
+		return false;
+	}
+
+	bQualityNavLinkRecoveryTriggered = true;
+
+	if (CachedZombieAI)
+	{
+		CachedZombieAI->StopMovement();
+	}
+
+	OnQualityMoveNavLinkRecovery(LastNavLinkContext);
+	return true;
 }
 
 void AZombieCharacter::OnQualityMoveFinished(EPathFollowingResult::Type ResultCode)

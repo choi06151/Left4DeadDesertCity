@@ -47,6 +47,21 @@ public:
 	UFUNCTION(BlueprintImplementableEvent, Category = "Zombie|AI")
 	void OnQualityMoveNavLink(const FZombieNavLinkContext& NavLinkContext);
 
+	/** Called once when a zombie cannot return to normal navigation after a quality NavLink. */
+	UFUNCTION(BlueprintImplementableEvent, Category = "Zombie|AI")
+	void OnQualityMoveNavLinkRecovery(const FZombieNavLinkContext& NavLinkContext);
+
+	/** Implement montage playback and hit detection in Blueprint. */
+	UFUNCTION(BlueprintImplementableEvent, Category = "Zombie|Combat")
+	void OnZombieAttack(AActor* TargetActor);
+
+	/** Call from Blueprint after the attack montage/hit window has completely finished. */
+	UFUNCTION(BlueprintCallable, Category = "Zombie|Combat")
+	void FinishZombieAttack();
+
+	UFUNCTION(BlueprintPure, Category = "Zombie|Combat")
+	bool IsZombieAttacking() const { return bIsAttacking; }
+
 	UPROPERTY(BlueprintAssignable, Category = "Zombie|AI")
 	FOnZombieMoveCompleted OnMoveCompleted;
 
@@ -68,6 +83,8 @@ public:
 
 protected:
 	void UpdateQualityChase(float DeltaTime);
+	void SimpleMoveInternal(FVector TargetLocation, bool bResetRecoveryAttempt);
+	void ConfigureActiveCollision();
 	void RequestQualityRepath(bool bForceRepath);
 	bool ShouldSwitchToSimpleMode() const;
 	float GetQualityRepathIntervalForDistance(float DistanceToTarget) const;
@@ -76,8 +93,12 @@ protected:
 	void HandleSimpleStuck();
 	void ResetQualityStuckTracking();
 	void HandleQualityStuck(float DeltaTime, float DistanceToTarget);
+	void StartZombieAttack(AActor* TargetActor);
 	void LaunchOutOfQualityStuck();
-	void TryRecoverOffNavAfterNavLink();
+	bool TryRecoverOffNavAfterNavLink();
+	bool TryRelocateFromNavLinkCollision();
+	bool IsCapsuleOverlappingBlockingGeometry(const FVector& Location) const;
+	bool TriggerQualityNavLinkRecovery();
 	void ResetRepeatedNavLinkTracking();
 	void DisableZombieActor();
 	void ResumeQualityChaseAfterNavLink();
@@ -104,12 +125,16 @@ private:
 	float LastQualityRepathTime = 0.0f;
 	float ForcedQualityUntilTime = 0.0f;
 	float QualityStuckTime = 0.0f;
+	float QualityStuckGraceUntilTime = 0.0f;
 	int32 ConsecutiveSimpleFailureCount = 0;
 	int32 ConsecutiveSimpleStuckCount = 0;
 	int32 SimpleStuckRecoveryAttemptCount = 0;
 	int32 RepeatedNavLinkCount = 0;
 	bool bIsUsingQualityNavLink = false;
 	bool bIgnoreNextQualityMoveFinished = false;
+	bool bHasQualityNavLinkContext = false;
+	bool bQualityNavLinkRecoveryTriggered = false;
+	bool bIsAttacking = false;
 
 public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Zombie|Stats")
@@ -206,7 +231,11 @@ public:
 	float QualityStuckGracePeriod = 0.6f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Zombie|AI")
-	float QualityStuckMinDistanceToTarget = 180.0f;
+	float QualityStuckMinDistanceToTarget = 60.0f;
+
+	/** Distance at which quality movement stops and Blueprint attack handling begins. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Zombie|Combat", meta = (ClampMin = "0.0"))
+	float AttackRange = 180.0f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Zombie|Movement")
 	float ActivationLaunchForwardStrength = 220.0f;
@@ -222,6 +251,14 @@ public:
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Zombie|Movement")
 	FVector NavLinkOffNavProjectionExtent = FVector(80.0f, 80.0f, 120.0f);
+
+	/** Search radius used to relocate a zombie whose capsule is stuck after a NavLink. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Zombie|Movement")
+	float NavLinkCollisionRecoveryRadius = 300.0f;
+
+	/** Maximum number of reachable NavMesh locations tested during collision recovery. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Zombie|Movement", meta = (ClampMin = "1"))
+	int32 NavLinkCollisionRecoveryAttempts = 12;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Zombie|Movement")
 	float JumpNavLinkFinishForwardNudge = 140.0f;

@@ -36,6 +36,7 @@ public:
 
 	bool IsSpawnLocationValid(const FVector& CandidateLocation, AZombieCharacter* TargetZombie) const;
 	bool IsSpawnLocationReachableToPlayer(const FVector& CandidateLocation) const;
+	FVector GetSurroundSlotLocation(const AZombieCharacter* Zombie, const FVector& TargetCenter) const;
 private:
 
 	
@@ -59,6 +60,20 @@ public:
 	
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Zombie Spawn")
 	int32 SpawnMaxAttempts = 20;
+
+	/** Radius of the first ring of stable zombie slots around a target. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Zombie Surround")
+	float SurroundBaseRadius = 140.0f;
+
+	/** Additional radius for every full group of SurroundSlotsPerRing zombies. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Zombie Surround")
+	float SurroundRingSpacing = 90.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Zombie Surround", meta = (ClampMin = "1"))
+	int32 SurroundSlotsPerRing = 12;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Zombie Surround")
+	FVector SurroundNavProjectionExtent = FVector(80.0f, 80.0f, 200.0f);
 	
 	UPROPERTY()
 	int32 CurrentSpawnedZombieCount = 0;
