@@ -20,6 +20,7 @@ public:
 protected:
 	// Called when the game starts or when spawned
 	virtual void BeginPlay() override;
+	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 
 public:	
 	// Called every frame
@@ -30,6 +31,9 @@ public:
 	UFUNCTION(BlueprintCallable)
 	void SpawnZombie();
 	void DeSpawnZombie(AZombieCharacter* Zombie);
+
+	UFUNCTION(BlueprintCallable, Category = "Zombie|Wave")
+	void SetZombieWaveIndex(int32 WaveIndex);
 	
 	UFUNCTION()
 	void OnZombieArrived(AZombieCharacter* ArrivedZombie);
@@ -37,7 +41,14 @@ public:
 	bool IsSpawnLocationValid(const FVector& CandidateLocation, AZombieCharacter* TargetZombie) const;
 	bool IsSpawnLocationReachableToPlayer(const FVector& CandidateLocation) const;
 	FVector GetSurroundSlotLocation(const AZombieCharacter* Zombie, const FVector& TargetCenter) const;
+
 private:
+	void MaintainZombiePopulation();
+	int32 GetActiveZombieCount() const;
+	int32 ResolveDesiredActiveZombieCount(int32 WaveIndex) const;
+	void SchedulePoolWarmup();
+	void WarmupZombiePool();
+	bool TrySpawnPooledZombieHidden();
 
 	
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Zombie Setup", meta = (AllowPrivateAccess = "true"))
@@ -48,9 +59,26 @@ private:
 
 	UPROPERTY()
 	APawn* Player;
+
+	FTimerHandle PoolWarmupTimerHandle;
 public:
-	UPROPERTY(VisibleAnywhere,BlueprintReadWrite)
-	int32 SpawnEnableZombieCount =2;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Zombie Setup", meta = (ClampMin = "1"))
+	int32 InitialPooledZombieCount = 5;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Zombie Setup", meta = (ClampMin = "1"))
+	int32 MaxPooledZombieCount = 30;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Zombie Wave")
+	int32 CurrentWaveIndex = 1;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Zombie Wave")
+	int32 DesiredActiveZombieCount = 5;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Zombie Setup", meta = (ClampMin = "0.01"))
+	float PoolWarmupInterval = 0.1f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Zombie Setup", meta = (ClampMin = "1"))
+	int32 PoolWarmupBatchSize = 1;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Zombie Spawn")
 	float SpawnMinDistance = 2500.0f;

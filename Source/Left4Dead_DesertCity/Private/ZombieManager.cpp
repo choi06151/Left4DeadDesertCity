@@ -20,6 +20,14 @@ void AZombieManager::BeginPlay()
 
 	Player = UGameplayStatics::GetPlayerPawn(this, 0);
 	InitializeZombies();
+	SetZombieWaveIndex(CurrentWaveIndex);
+	SchedulePoolWarmup();
+}
+
+void AZombieManager::EndPlay(const EEndPlayReason::Type EndPlayReason)
+{
+	GetWorldTimerManager().ClearTimer(PoolWarmupTimerHandle);
+	Super::EndPlay(EndPlayReason);
 }
 
 void AZombieManager::Tick(float DeltaTime)
@@ -41,31 +49,13 @@ void AZombieManager::InitializeZombies()
 		return;
 	}
 
-	FActorSpawnParameters SpawnParams;
-	SpawnParams.Owner = this;
-	SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
-
-	const FVector InvisibleLocation(0.0f, 0.0f, -10000.0f);
-	const FRotator SpawnRotation = FRotator::ZeroRotator;
-
-	for (int32 i = 0; i < SpawnEnableZombieCount; i++)
+	const int32 InitialPoolCount = FMath::Min(InitialPooledZombieCount, MaxPooledZombieCount);
+	for (int32 i = 0; i < InitialPoolCount; i++)
 	{
-		AZombieCharacter* NewZombie = World->SpawnActor<AZombieCharacter>(
-			ZombieClassSlot,
-			InvisibleLocation,
-			SpawnRotation,
-			SpawnParams);
-
-		if (!NewZombie)
+		if (!TrySpawnPooledZombieHidden())
 		{
-			continue;
+			break;
 		}
-
-		Zombies.Add(NewZombie);
-		NewZombie->OnMoveCompleted.AddDynamic(this, &AZombieManager::OnZombieArrived);
-		NewZombie->SetActorHiddenInGame(true);
-		NewZombie->SetActorEnableCollision(false);
-		CurrentSpawnedZombieCount++;
 	}
 }
 
@@ -173,6 +163,7 @@ void AZombieManager::SpawnZombie()
 
 	TargetZombie->ZombieActivateSet();
 	TargetZombie->LaunchTowardActor(Player);
+	CurrentSpawnedZombieCount = GetActiveZombieCount();
 
 	if (AZombieAIController* AICon = Cast<AZombieAIController>(TargetZombie->GetController()))
 	{
@@ -191,6 +182,15 @@ void AZombieManager::DeSpawnZombie(AZombieCharacter* Zombie)
 	Zombie->SetActorHiddenInGame(true);
 	Zombie->SetActorEnableCollision(false);
 	Zombie->SetActorLocation(FVector(0.0f, 0.0f, -10000.0f));
+	CurrentSpawnedZombieCount = GetActiveZombieCount();
+	MaintainZombiePopulation();
+}
+
+void AZombieManager::SetZombieWaveIndex(int32 WaveIndex)
+{
+	CurrentWaveIndex = FMath::Clamp(WaveIndex, 0, 6);
+	DesiredActiveZombieCount = ResolveDesiredActiveZombieCount(CurrentWaveIndex);
+	MaintainZombiePopulation();
 }
 
 void AZombieManager::OnZombieArrived(AZombieCharacter* ArrivedZombie)
@@ -295,4 +295,124 @@ FVector AZombieManager::GetSurroundSlotLocation(
 	}
 
 	return DesiredLocation;
+}
+
+void AZombieManager::MaintainZombiePopulation()
+{
+	const int32 TargetActiveZombieCount = FMath::Min(DesiredActiveZombieCount, Zombies.Num());
+	CurrentSpawnedZombieCount = GetActiveZombieCount();
+
+	while (CurrentSpawnedZombieCount < TargetActiveZombieCount)
+	{
+		const int32 ActiveCountBeforeSpawn = CurrentSpawnedZombieCount;
+		SpawnZombie();
+
+		if (CurrentSpawnedZombieCount <= ActiveCountBeforeSpawn)
+		{
+			break;
+		}
+	}
+}
+
+int32 AZombieManager::GetActiveZombieCount() const
+{
+	int32 ActiveZombieCount = 0;
+
+	for (const TWeakObjectPtr<AZombieCharacter>& ZombiePtr : Zombies)
+	{
+		const AZombieCharacter* Zombie = ZombiePtr.Get();
+		if (Zombie && !Zombie->IsHidden())
+		{
+			++ActiveZombieCount;
+		}
+	}
+
+	return ActiveZombieCount;
+}
+
+int32 AZombieManager::ResolveDesiredActiveZombieCount(int32 WaveIndex) const
+{
+	switch (WaveIndex)
+	{
+	case 0:
+		return 0;
+	case 1:
+		return 5;
+	default:
+		return 15 + ((WaveIndex - 2) * 5);
+	}
+}
+
+void AZombieManager::SchedulePoolWarmup()
+{
+	if (Zombies.Num() >= MaxPooledZombieCount || PoolWarmupInterval <= 0.0f)
+	{
+		return;
+	}
+
+	GetWorldTimerManager().SetTimer(
+		PoolWarmupTimerHandle,
+		this,
+		&AZombieManager::WarmupZombiePool,
+		PoolWarmupInterval,
+		true);
+}
+
+void AZombieManager::WarmupZombiePool()
+{
+	if (Zombies.Num() >= MaxPooledZombieCount)
+	{
+		GetWorldTimerManager().ClearTimer(PoolWarmupTimerHandle);
+		return;
+	}
+
+	const int32 BatchCount = FMath::Max(1, PoolWarmupBatchSize);
+	for (int32 Index = 0; Index < BatchCount && Zombies.Num() < MaxPooledZombieCount; ++Index)
+	{
+		if (!TrySpawnPooledZombieHidden())
+		{
+			GetWorldTimerManager().ClearTimer(PoolWarmupTimerHandle);
+			return;
+		}
+	}
+
+	MaintainZombiePopulation();
+}
+
+bool AZombieManager::TrySpawnPooledZombieHidden()
+{
+	if (!ZombieClassSlot)
+	{
+		return false;
+	}
+
+	UWorld* World = GetWorld();
+	if (!World)
+	{
+		return false;
+	}
+
+	FActorSpawnParameters SpawnParams;
+	SpawnParams.Owner = this;
+	SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+
+	const FVector InvisibleLocation(0.0f, 0.0f, -10000.0f);
+	const FRotator SpawnRotation = FRotator::ZeroRotator;
+
+	AZombieCharacter* NewZombie = World->SpawnActor<AZombieCharacter>(
+		ZombieClassSlot,
+		InvisibleLocation,
+		SpawnRotation,
+		SpawnParams);
+
+	if (!NewZombie)
+	{
+		return false;
+	}
+
+	Zombies.Add(NewZombie);
+	NewZombie->OnMoveCompleted.AddDynamic(this, &AZombieManager::OnZombieArrived);
+	NewZombie->SetActorHiddenInGame(true);
+	NewZombie->SetActorEnableCollision(false);
+	return true;
 }
