@@ -39,6 +39,10 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Zombie|AI")
 	void QualityMove(AActor* TargetActor);
 
+	/** Move toward an actor while retaining it as the combat target. */
+	UFUNCTION(BlueprintCallable, Category = "Zombie|AI")
+	void MoveToActor(AActor* TargetActor);
+
 	UFUNCTION(BlueprintCallable, Category = "Zombie|AI")
 	void FinishQualityMoveNavLink();
 
@@ -74,6 +78,16 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Zombie|Event")
 	void ZombieForceReturnToPool();
 
+	/** Resets the pooled/dead state before ZombieActivateSet is dispatched. */
+	void PrepareZombieActivation();
+
+	UFUNCTION(BlueprintPure, Category = "Zombie|Event")
+	bool IsZombieDeactivated() const { return bIsZombieDeactivated; }
+
+	/** Pauses skeletal animation at its current pose. Spawn automatically resumes it. */
+	UFUNCTION(BlueprintCallable, Category = "Zombie|Animation")
+	void PauseZombieAnimation();
+
 	UFUNCTION(BlueprintCallable, Category = "Zombie|Movement")
 	void LaunchTowardActor(AActor* TargetActor);
 
@@ -94,6 +108,7 @@ protected:
 	void ResetQualityStuckTracking();
 	void HandleQualityStuck(float DeltaTime, float DistanceToTarget);
 	void StartZombieAttack(AActor* TargetActor);
+	bool TryAttackCurrentTarget();
 	void LaunchOutOfQualityStuck();
 	bool TryRecoverOffNavAfterNavLink();
 	bool TryRelocateFromNavLinkCollision();
@@ -135,6 +150,7 @@ private:
 	bool bHasQualityNavLinkContext = false;
 	bool bQualityNavLinkRecoveryTriggered = false;
 	bool bIsAttacking = false;
+	bool bIsZombieDeactivated = true;
 
 public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Zombie|Stats")

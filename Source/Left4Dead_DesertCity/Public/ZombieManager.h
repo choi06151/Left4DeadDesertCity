@@ -7,6 +7,7 @@
 #include "ZombieManager.generated.h"
 
 class AZombieCharacter;
+class ATargetPoint;
 
 UCLASS()
 class LEFT4DEAD_DESERTCITY_API AZombieManager : public AActor
@@ -34,6 +35,24 @@ public:
 
 	UFUNCTION(BlueprintCallable, Category = "Zombie|Wave")
 	void SetZombieWaveIndex(int32 WaveIndex);
+
+	/** Redirects every active zombie to this world location until ClearZombieMoveFocus is called. */
+	UFUNCTION(BlueprintCallable, Category = "Zombie|Movement Focus")
+	void SetZombieMoveFocusLocation(FVector TargetLocation);
+
+	/** Redirects every active zombie to the actor, following it while it moves. */
+	UFUNCTION(BlueprintCallable, Category = "Zombie|Movement Focus")
+	void SetZombieMoveFocusActor(AActor* TargetActor);
+
+	/** Ends movement focus and immediately resumes the normal player chase decision. */
+	UFUNCTION(BlueprintCallable, Category = "Zombie|Movement Focus")
+	void ClearZombieMoveFocus();
+
+	UFUNCTION(BlueprintPure, Category = "Zombie|Movement Focus")
+	bool IsZombieMoveFocusActive() const { return bZombieMoveFocusActive; }
+
+	FVector GetCurrentZombieMoveFocusLocation() const { return GetMoveFocusLocation(); }
+	AActor* GetCurrentZombieMoveFocusActor() const { return ZombieMoveFocusActor.Get(); }
 	
 	UFUNCTION()
 	void OnZombieArrived(AZombieCharacter* ArrivedZombie);
@@ -43,12 +62,19 @@ public:
 	FVector GetSurroundSlotLocation(const AZombieCharacter* Zombie, const FVector& TargetCenter) const;
 
 private:
+	void ApplyMoveFocusToActiveZombies(bool bForceRequest);
+	void MaintainActorMoveFocus();
+	void ResumeNormalMovement(AZombieCharacter* Zombie);
+	FVector GetMoveFocusLocation() const;
 	void MaintainZombiePopulation();
 	int32 GetActiveZombieCount() const;
 	int32 ResolveDesiredActiveZombieCount(int32 WaveIndex) const;
 	void SchedulePoolWarmup();
 	void WarmupZombiePool();
-	bool TrySpawnPooledZombieHidden();
+	void CollectInitialSpawnTargetPoints();
+	bool TrySpawnInitialWaitingZombie();
+	bool ActivateInitialWaitingZombie();
+	bool ActivateZombie(AZombieCharacter* Zombie, bool bLaunchOnActivation);
 
 	
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Zombie Setup", meta = (AllowPrivateAccess = "true"))
@@ -57,11 +83,37 @@ private:
 	UPROPERTY()
 	TArray<TWeakObjectPtr<AZombieCharacter>> Zombies;
 
+	/** TargetPoints collected from the level and sorted by actor name. */
+	UPROPERTY(VisibleInstanceOnly, BlueprintReadOnly, Category = "Zombie Setup", meta = (AllowPrivateAccess = "true"))
+	TArray<TObjectPtr<ATargetPoint>> InitialSpawnTargetPoints;
+
+	/** Initially placed zombies that are visible but have not joined a wave yet. */
+	UPROPERTY()
+	TArray<TWeakObjectPtr<AZombieCharacter>> InitialWaitingZombies;
+
+	int32 NextInitialSpawnTargetPointIndex = 0;
+
 	UPROPERTY()
 	APawn* Player;
 
 	FTimerHandle PoolWarmupTimerHandle;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Zombie|Movement Focus", meta = (AllowPrivateAccess = "true"))
+	bool bZombieMoveFocusActive = false;
+
+	UPROPERTY()
+	TWeakObjectPtr<AActor> ZombieMoveFocusActor;
+
+	FVector ZombieMoveFocusLocation = FVector::ZeroVector;
+	FVector LastAppliedMoveFocusLocation = FVector::ZeroVector;
 public:
+	/** Minimum actor movement required before active zombie paths are refreshed. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Zombie|Movement Focus", meta = (ClampMin = "1.0"))
+	float MoveFocusRefreshDistance = 30.0f;
+
+	/** When an actor moves away after a zombie has arrived, chasing resumes past this distance. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Zombie|Movement Focus", meta = (ClampMin = "30.0"))
+	float MoveFocusResumeDistance = 75.0f;
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Zombie Setup", meta = (ClampMin = "1"))
 	int32 InitialPooledZombieCount = 5;
 
@@ -69,10 +121,10 @@ public:
 	int32 MaxPooledZombieCount = 30;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Zombie Wave")
-	int32 CurrentWaveIndex = 1;
+	int32 CurrentWaveIndex = 0;
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Zombie Wave")
-	int32 DesiredActiveZombieCount = 5;
+	int32 DesiredActiveZombieCount = 0;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Zombie Setup", meta = (ClampMin = "0.01"))
 	float PoolWarmupInterval = 0.1f;

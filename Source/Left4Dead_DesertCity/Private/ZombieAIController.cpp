@@ -9,6 +9,7 @@
 #include "Perception/AISense_Sight.h"
 #include "ZombieCharacter.h"
 #include "ZombieCrowdFollowingComponent.h"
+#include "ZombieManager.h"
 
 AZombieAIController::AZombieAIController(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer.SetDefaultSubobjectClass<UZombieCrowdFollowingComponent>(TEXT("PathFollowingComponent")))
@@ -93,6 +94,15 @@ void AZombieAIController::ApplyStatsRow(const FZombieStatsRow& StatsRow)
 
 void AZombieAIController::OnTargetPerceptionUpdated(AActor* Actor, FAIStimulus Stimulus)
 {
+	if (const AZombieCharacter* ZombieChar = Cast<AZombieCharacter>(GetPawn()))
+	{
+		if (const AZombieManager* Manager = Cast<AZombieManager>(ZombieChar->GetOwner());
+			Manager && Manager->IsZombieMoveFocusActive())
+		{
+			return;
+		}
+	}
+
 	if (!bPerceptionEnabled || CurrentMode != EZombieAIMode::Simple)
 	{
 		return;
@@ -183,6 +193,11 @@ void AZombieAIController::OnMoveCompleted(FAIRequestID RequestID, const FPathFol
 
 	if (AZombieCharacter* ZombieChar = Cast<AZombieCharacter>(GetPawn()))
 	{
+		if (ZombieChar->IsZombieDeactivated())
+		{
+			return;
+		}
+
 		if (CurrentMode == EZombieAIMode::Simple)
 		{
 			ZombieChar->OnSimpleMoveFinished(Result.Code);

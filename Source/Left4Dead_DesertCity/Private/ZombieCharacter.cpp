@@ -104,6 +104,11 @@ void AZombieCharacter::Tick(float DeltaTime)
 {
 	Super::Tick(DeltaTime);
 
+	if (TryAttackCurrentTarget())
+	{
+		return;
+	}
+
 	UpdateQualityChase(DeltaTime);
 }
 
@@ -114,11 +119,21 @@ void AZombieCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputCom
 
 void AZombieCharacter::SimpleMove(FVector TargetLocation)
 {
+	if (bIsZombieDeactivated)
+	{
+		return;
+	}
+
 	SimpleMoveInternal(TargetLocation, true);
 }
 
 void AZombieCharacter::SimpleMoveInternal(FVector TargetLocation, bool bResetRecoveryAttempt)
 {
+	if (bIsZombieDeactivated)
+	{
+		return;
+	}
+
 	if (!CachedZombieAI)
 	{
 		CachedZombieAI = Cast<AZombieAIController>(GetController());
@@ -166,7 +181,7 @@ void AZombieCharacter::SimpleMoveInternal(FVector TargetLocation, bool bResetRec
 
 void AZombieCharacter::QualityMove(AActor* TargetActor)
 {
-	if (!TargetActor)
+	if (bIsZombieDeactivated || !TargetActor)
 	{
 		return;
 	}
@@ -197,8 +212,25 @@ void AZombieCharacter::QualityMove(AActor* TargetActor)
 	RequestQualityRepath(true);
 }
 
+void AZombieCharacter::MoveToActor(AActor* TargetActor)
+{
+	if (bIsZombieDeactivated || !IsValid(TargetActor))
+	{
+		return;
+	}
+
+	SimpleMoveInternal(TargetActor->GetActorLocation(), true);
+	QualityTargetActor = TargetActor;
+	SetActorTickEnabled(true);
+}
+
 void AZombieCharacter::FinishQualityMoveNavLink()
 {
+	if (bIsZombieDeactivated)
+	{
+		return;
+	}
+
 	if (!CachedZombieAI)
 	{
 		CachedZombieAI = Cast<AZombieAIController>(GetController());
@@ -299,6 +331,11 @@ bool AZombieCharacter::TryRelocateFromNavLinkCollision()
 
 void AZombieCharacter::HandleQualityNavLink(const FZombieNavLinkContext& NavLinkContext)
 {
+	if (bIsZombieDeactivated)
+	{
+		return;
+	}
+
 	bHasQualityNavLinkContext = true;
 	bQualityNavLinkRecoveryTriggered = false;
 
@@ -348,6 +385,11 @@ void AZombieCharacter::HandleQualityNavLink(const FZombieNavLinkContext& NavLink
 
 void AZombieCharacter::ZombieDeActivateSet()
 {
+	if (bIsZombieDeactivated)
+	{
+		return;
+	}
+
 	StopSimpleStuckCheck();
 	DisableZombieActor();
 
@@ -378,6 +420,33 @@ void AZombieCharacter::ZombieForceReturnToPool()
 	if (AZombieManager* Manager = Cast<AZombieManager>(GetOwner()))
 	{
 		Manager->DeSpawnZombie(this);
+	}
+}
+
+void AZombieCharacter::PrepareZombieActivation()
+{
+	GetWorldTimerManager().ClearTimer(DespawnTimerHandle);
+	StopSimpleStuckCheck();
+	if (USkeletalMeshComponent* MeshComp = GetMesh())
+	{
+		MeshComp->bPauseAnims = false;
+	}
+	bIsZombieDeactivated = false;
+	bIsAttacking = false;
+	QualityTargetActor.Reset();
+	ForcedQualityUntilTime = 0.0f;
+	ConsecutiveSimpleFailureCount = 0;
+	ConsecutiveSimpleStuckCount = 0;
+	SimpleStuckRecoveryAttemptCount = 0;
+	ResetQualityStuckTracking();
+	ResetRepeatedNavLinkTracking();
+}
+
+void AZombieCharacter::PauseZombieAnimation()
+{
+	if (USkeletalMeshComponent* MeshComp = GetMesh())
+	{
+		MeshComp->bPauseAnims = true;
 	}
 }
 
@@ -412,6 +481,11 @@ void AZombieCharacter::OnSimpleMoveTargetReached()
 void AZombieCharacter::OnSimpleMoveFinished(EPathFollowingResult::Type ResultCode)
 {
 	StopSimpleStuckCheck();
+
+	if (bIsZombieDeactivated)
+	{
+		return;
+	}
 
 	if (CachedZombieAI)
 	{
@@ -454,7 +528,7 @@ void AZombieCharacter::OnSimpleMoveFinished(EPathFollowingResult::Type ResultCod
 
 void AZombieCharacter::UpdateQualityChase(float DeltaTime)
 {
-	if (!CachedZombieAI || CachedZombieAI->GetCurrentMode() != EZombieAIMode::Quality)
+	if (bIsZombieDeactivated || !CachedZombieAI || CachedZombieAI->GetCurrentMode() != EZombieAIMode::Quality)
 	{
 		return;
 	}
@@ -477,20 +551,38 @@ void AZombieCharacter::UpdateQualityChase(float DeltaTime)
 	}
 
 	const float DistanceToTarget = FVector::Dist(GetActorLocation(), TargetActor->GetActorLocation());
-	if (DistanceToTarget <= AttackRange)
-	{
-		StartZombieAttack(TargetActor);
-		return;
-	}
 
 	if (ShouldSwitchToSimpleMode())
 	{
-		SimpleMove(TargetActor->GetActorLocation());
+		MoveToActor(TargetActor);
 		return;
 	}
 
 	HandleQualityStuck(DeltaTime, DistanceToTarget);
 	RequestQualityRepath(false);
+}
+
+bool AZombieCharacter::TryAttackCurrentTarget()
+{
+	if (bIsZombieDeactivated || bIsAttacking || bIsUsingQualityNavLink)
+	{
+		return bIsAttacking;
+	}
+
+	AActor* TargetActor = QualityTargetActor.Get();
+	if (!IsValid(TargetActor))
+	{
+		QualityTargetActor.Reset();
+		return false;
+	}
+
+	if (FVector::Dist(GetActorLocation(), TargetActor->GetActorLocation()) > AttackRange)
+	{
+		return false;
+	}
+
+	StartZombieAttack(TargetActor);
+	return true;
 }
 
 void AZombieCharacter::StartZombieAttack(AActor* TargetActor)
@@ -519,7 +611,7 @@ void AZombieCharacter::StartZombieAttack(AActor* TargetActor)
 
 void AZombieCharacter::FinishZombieAttack()
 {
-	if (!bIsAttacking)
+	if (bIsZombieDeactivated || !bIsAttacking)
 	{
 		return;
 	}
@@ -650,6 +742,20 @@ void AZombieCharacter::TriggerTemporaryQualityFromSimpleBlock()
 	SimpleStuckRecoveryAttemptCount = 0;
 	StopSimpleStuckCheck();
 
+	if (const AZombieManager* Manager = Cast<AZombieManager>(GetOwner());
+		Manager && Manager->IsZombieMoveFocusActive())
+	{
+		if (AActor* FocusActor = Manager->GetCurrentZombieMoveFocusActor())
+		{
+			MoveToActor(FocusActor);
+		}
+		else
+		{
+			SimpleMoveInternal(Manager->GetCurrentZombieMoveFocusLocation(), false);
+		}
+		return;
+	}
+
 	if (!CachedZombieAI)
 	{
 		CachedZombieAI = Cast<AZombieAIController>(GetController());
@@ -694,7 +800,7 @@ void AZombieCharacter::StopSimpleStuckCheck()
 
 void AZombieCharacter::CheckSimpleStuck()
 {
-	if (!CachedZombieAI || CachedZombieAI->GetCurrentMode() != EZombieAIMode::Simple)
+	if (bIsZombieDeactivated || !CachedZombieAI || CachedZombieAI->GetCurrentMode() != EZombieAIMode::Simple)
 	{
 		StopSimpleStuckCheck();
 		return;
@@ -739,6 +845,20 @@ void AZombieCharacter::HandleSimpleStuck()
 {
 	ConsecutiveSimpleStuckCount = 0;
 
+	if (const AZombieManager* Manager = Cast<AZombieManager>(GetOwner());
+		Manager && Manager->IsZombieMoveFocusActive())
+	{
+		if (AActor* FocusActor = Manager->GetCurrentZombieMoveFocusActor())
+		{
+			MoveToActor(FocusActor);
+		}
+		else
+		{
+			SimpleMoveInternal(Manager->GetCurrentZombieMoveFocusLocation(), false);
+		}
+		return;
+	}
+
 	AActor* PlayerActor = UGameplayStatics::GetPlayerPawn(this, 0);
 	if (PlayerActor)
 	{
@@ -775,11 +895,16 @@ void AZombieCharacter::ResetRepeatedNavLinkTracking()
 
 void AZombieCharacter::DisableZombieActor()
 {
+	// Set this before StopMovement: stopping an active request can synchronously
+	// dispatch OnMoveCompleted, which must not restart a dead zombie.
+	bIsZombieDeactivated = true;
 	StopSimpleStuckCheck();
 	bIsAttacking = false;
+	QualityTargetActor.Reset();
 
 	if (AZombieAIController* AICon = Cast<AZombieAIController>(GetController()))
 	{
+		AICon->SetPerceptionEnabled(false);
 		AICon->StopMovement();
 	}
 
@@ -955,6 +1080,11 @@ bool AZombieCharacter::TriggerQualityNavLinkRecovery()
 
 void AZombieCharacter::OnQualityMoveFinished(EPathFollowingResult::Type ResultCode)
 {
+	if (bIsZombieDeactivated)
+	{
+		return;
+	}
+
 	if (bIsUsingQualityNavLink)
 	{
 		return;
