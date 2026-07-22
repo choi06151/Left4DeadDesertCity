@@ -82,7 +82,11 @@ public:
 	float sightRadius=700.f;
 	
 	UPROPERTY(VisibleAnywhere, BlueprintReadWrite, Category = "AI|Perception")
-	float hearRadius=900.f;
+	float hearRadius = 15000.0f;
+
+	/** DataTable hearing values cannot reduce gunshot hearing below this range. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AI|Perception", meta = (ClampMin = "0.0"))
+	float MinimumHearingRange = 15000.0f;
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadWrite, Category = "AI|Perception")
 	float loseSightRadiusOffset = 500.0f;

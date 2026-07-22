@@ -7,6 +7,7 @@
 #include "Kismet/GameplayStatics.h"
 #include "NavigationPath.h"
 #include "NavigationSystem.h"
+#include "Perception/AISense_Hearing.h"
 #include "ZombieAIController.h"
 #include "ZombieCharacter.h"
 
@@ -37,6 +38,13 @@ void AZombieManager::EndPlay(const EEndPlayReason::Type EndPlayReason)
 void AZombieManager::Tick(float DeltaTime)
 {
 	Super::Tick(DeltaTime);
+
+	// A wave may already be running when the player approaches another staged
+	// zombie. Re-evaluate only while initial idle zombies remain.
+	if (InitialWaitingZombies.Num() > 0 && GetActiveZombieCount() < DesiredActiveZombieCount)
+	{
+		MaintainZombiePopulation();
+	}
 
 	if (bZombieMoveFocusActive && ZombieMoveFocusActor.IsValid())
 	{
@@ -84,9 +92,15 @@ void AZombieManager::SpawnZombie()
 
 	// Zombies created at level start wait visibly on TargetPoints. Consume them
 	// in that same order before reusing zombies that died and entered the pool.
-	if (ActivateInitialWaitingZombie())
+	if (InitialWaitingZombies.Num() > 0)
 	{
-		CurrentSpawnedZombieCount = GetActiveZombieCount();
+		if (ActivateInitialWaitingZombie())
+		{
+			CurrentSpawnedZombieCount = GetActiveZombieCount();
+		}
+
+		// Initial TargetPoint zombies must be consumed by proximity before dead
+		// pooled zombies begin using the random around-player spawn path.
 		return;
 	}
 
@@ -197,6 +211,62 @@ void AZombieManager::SetZombieWaveIndex(int32 WaveIndex)
 	CurrentWaveIndex = FMath::Clamp(WaveIndex, 0, 6);
 	DesiredActiveZombieCount = ResolveDesiredActiveZombieCount(CurrentWaveIndex);
 	MaintainZombiePopulation();
+}
+
+void AZombieManager::ReportPlayerGunshot(float Loudness)
+{
+	if (!Player || !GetWorld())
+	{
+		return;
+	}
+
+	UAISense_Hearing::ReportNoiseEvent(
+		GetWorld(),
+		Player->GetActorLocation(),
+		FMath::Max(0.0f, Loudness),
+		Player,
+		0.0f,
+		TEXT("Gunshot"));
+
+	// Staged zombies deliberately have perception disabled, so they cannot
+	// receive the hearing stimulus themselves. Wake a limited number of the
+	// nearest staged zombies here and let their normal AI chase take over.
+	const int32 ResponderLimit = FMath::Max(0, MaxIdleGunshotResponders);
+	const float AlertDistanceSquared = FMath::Square(FMath::Max(0.0f, GunshotIdleAlertDistance));
+	for (int32 ResponderIndex = 0; ResponderIndex < ResponderLimit; ++ResponderIndex)
+	{
+		int32 NearestWaitingIndex = INDEX_NONE;
+		float NearestDistanceSquared = AlertDistanceSquared;
+
+		for (int32 WaitingIndex = InitialWaitingZombies.Num() - 1; WaitingIndex >= 0; --WaitingIndex)
+		{
+			AZombieCharacter* WaitingZombie = InitialWaitingZombies[WaitingIndex].Get();
+			if (!WaitingZombie)
+			{
+				InitialWaitingZombies.RemoveAt(WaitingIndex);
+				continue;
+			}
+
+			const float DistanceSquared = FVector::DistSquared2D(
+				WaitingZombie->GetActorLocation(), Player->GetActorLocation());
+			if (DistanceSquared <= NearestDistanceSquared)
+			{
+				NearestDistanceSquared = DistanceSquared;
+				NearestWaitingIndex = WaitingIndex;
+			}
+		}
+
+		if (NearestWaitingIndex == INDEX_NONE)
+		{
+			break;
+		}
+
+		AZombieCharacter* RespondingZombie = InitialWaitingZombies[NearestWaitingIndex].Get();
+		InitialWaitingZombies.RemoveAt(NearestWaitingIndex);
+		ActivateZombie(RespondingZombie, false);
+	}
+
+	CurrentSpawnedZombieCount = GetActiveZombieCount();
 }
 
 void AZombieManager::SetZombieMoveFocusLocation(FVector TargetLocation)
@@ -581,6 +651,7 @@ bool AZombieManager::TrySpawnInitialWaitingZombie()
 	}
 
 	FVector SpawnLocation = SpawnPoint->GetActorLocation();
+	SpawnLocation.Z += InitialSpawnHeightOffset;
 	const FRotator SpawnRotation = SpawnPoint->GetActorRotation();
 
 	AZombieCharacter* NewZombie = World->SpawnActor<AZombieCharacter>(
@@ -626,14 +697,30 @@ bool AZombieManager::TrySpawnInitialWaitingZombie()
 
 bool AZombieManager::ActivateInitialWaitingZombie()
 {
-	while (InitialWaitingZombies.Num() > 0)
+	if (!Player)
 	{
-		AZombieCharacter* Zombie = InitialWaitingZombies[0].Get();
-		InitialWaitingZombies.RemoveAt(0);
-		if (Zombie)
+		return false;
+	}
+
+	const FVector PlayerLocation = Player->GetActorLocation();
+	const float ActivationDistanceSquared = FMath::Square(FMath::Max(0.0f, InitialIdleActivationDistance));
+
+	for (int32 Index = 0; Index < InitialWaitingZombies.Num();)
+	{
+		AZombieCharacter* Zombie = InitialWaitingZombies[Index].Get();
+		if (!Zombie)
 		{
+			InitialWaitingZombies.RemoveAt(Index);
+			continue;
+		}
+
+		if (FVector::DistSquared2D(Zombie->GetActorLocation(), PlayerLocation) <= ActivationDistanceSquared)
+		{
+			InitialWaitingZombies.RemoveAt(Index);
 			return ActivateZombie(Zombie, false);
 		}
+
+		++Index;
 	}
 
 	return false;

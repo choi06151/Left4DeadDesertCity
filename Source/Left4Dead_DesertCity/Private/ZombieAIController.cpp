@@ -68,7 +68,7 @@ void AZombieAIController::BeginPlay()
 void AZombieAIController::ApplyStatsRow(const FZombieStatsRow& StatsRow)
 {
 	sightRadius = StatsRow.SightRadius;
-	hearRadius = StatsRow.HearRadius;
+	hearRadius = FMath::Max(StatsRow.HearRadius, MinimumHearingRange);
 	loseSightRadiusOffset = StatsRow.LoseSightRadiusOffset;
 	peripheralVisionAngleDegrees = StatsRow.PeripheralVisionAngleDegrees;
 	sightMaxAge = StatsRow.SightMaxAge;
@@ -114,9 +114,6 @@ void AZombieAIController::OnTargetPerceptionUpdated(AActor* Actor, FAIStimulus S
 	}
 	
 	
-	if (!Actor->ActorHasTag("Player"))
-		return;
-
 	AZombieCharacter* ZombieChar = Cast<AZombieCharacter>(GetPawn());
 	if (!ZombieChar)
 	{
@@ -125,6 +122,11 @@ void AZombieAIController::OnTargetPerceptionUpdated(AActor* Actor, FAIStimulus S
 
 	if (Stimulus.Type == UAISense::GetSenseID<UAISense_Sight>())
 	{
+		if (!Actor->ActorHasTag("Player"))
+		{
+			return;
+		}
+
 		SetAIMode(EZombieAIMode::Quality);
 		ZombieChar->QualityMove(Actor);
 		return;

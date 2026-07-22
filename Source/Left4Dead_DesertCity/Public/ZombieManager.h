@@ -36,6 +36,10 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Zombie|Wave")
 	void SetZombieWaveIndex(int32 WaveIndex);
 
+	/** Sends a gunshot hearing stimulus from the player's current location. */
+	UFUNCTION(BlueprintCallable, Category = "Zombie|Perception")
+	void ReportPlayerGunshot(float Loudness = 1.0f);
+
 	/** Redirects every active zombie to this world location until ClearZombieMoveFocus is called. */
 	UFUNCTION(BlueprintCallable, Category = "Zombie|Movement Focus")
 	void SetZombieMoveFocusLocation(FVector TargetLocation);
@@ -115,10 +119,26 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Zombie|Movement Focus", meta = (ClampMin = "30.0"))
 	float MoveFocusResumeDistance = 75.0f;
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Zombie Setup", meta = (ClampMin = "1"))
-	int32 InitialPooledZombieCount = 5;
+	int32 InitialPooledZombieCount = 20;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Zombie Setup", meta = (ClampMin = "1"))
 	int32 MaxPooledZombieCount = 30;
+
+	/** Height added to TargetPoint locations for the initial idle placement. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Zombie Setup")
+	float InitialSpawnHeightOffset = 100.0f;
+
+	/** Only initial idle zombies within this 2D distance of the player join a wave. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Zombie Setup", meta = (ClampMin = "0.0"))
+	float InitialIdleActivationDistance = 3000.0f;
+
+	/** Initial idle zombies inside this distance can react directly to a gunshot. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Zombie|Perception", meta = (ClampMin = "0.0"))
+	float GunshotIdleAlertDistance = 15000.0f;
+
+	/** Maximum number of initial idle zombies awakened by a single gunshot. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Zombie|Perception", meta = (ClampMin = "0"))
+	int32 MaxIdleGunshotResponders = 5;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Zombie Wave")
 	int32 CurrentWaveIndex = 0;
