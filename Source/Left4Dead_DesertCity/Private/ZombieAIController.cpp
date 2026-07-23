@@ -7,6 +7,7 @@
 #include "Perception/AISenseConfig_Sight.h"
 #include "Perception/AISense_Hearing.h"
 #include "Perception/AISense_Sight.h"
+#include "Kismet/GameplayStatics.h"
 #include "ZombieCharacter.h"
 #include "ZombieCrowdFollowingComponent.h"
 #include "ZombieManager.h"
@@ -94,15 +95,6 @@ void AZombieAIController::ApplyStatsRow(const FZombieStatsRow& StatsRow)
 
 void AZombieAIController::OnTargetPerceptionUpdated(AActor* Actor, FAIStimulus Stimulus)
 {
-	if (const AZombieCharacter* ZombieChar = Cast<AZombieCharacter>(GetPawn()))
-	{
-		if (const AZombieManager* Manager = Cast<AZombieManager>(ZombieChar->GetOwner());
-			Manager && Manager->IsZombieMoveFocusActive())
-		{
-			return;
-		}
-	}
-
 	if (!bPerceptionEnabled || CurrentMode != EZombieAIMode::Simple)
 	{
 		return;
@@ -112,8 +104,7 @@ void AZombieAIController::OnTargetPerceptionUpdated(AActor* Actor, FAIStimulus S
 	{
 		return;
 	}
-	
-	
+
 	AZombieCharacter* ZombieChar = Cast<AZombieCharacter>(GetPawn());
 	if (!ZombieChar)
 	{
@@ -122,7 +113,8 @@ void AZombieAIController::OnTargetPerceptionUpdated(AActor* Actor, FAIStimulus S
 
 	if (Stimulus.Type == UAISense::GetSenseID<UAISense_Sight>())
 	{
-		if (!Actor->ActorHasTag("Player"))
+		const AActor* PlayerActor = UGameplayStatics::GetPlayerPawn(this, 0);
+		if (Actor != PlayerActor && !Actor->ActorHasTag("Player"))
 		{
 			return;
 		}
@@ -134,6 +126,12 @@ void AZombieAIController::OnTargetPerceptionUpdated(AActor* Actor, FAIStimulus S
 
 	if (Stimulus.Type == UAISense::GetSenseID<UAISense_Hearing>())
 	{
+		if (const AZombieManager* Manager = Cast<AZombieManager>(ZombieChar->GetOwner());
+			Manager && Manager->IsZombieMoveFocusActive())
+		{
+			return;
+		}
+
 		SetAIMode(EZombieAIMode::Simple);
 		ZombieChar->SimpleMove(Stimulus.StimulusLocation);
 	}
@@ -150,6 +148,11 @@ void AZombieAIController::SetPerceptionEnabled(bool bEnable)
 
 	ZombiePerceptionComponent->SetSenseEnabled(UAISense_Sight::StaticClass(), bEnable);
 	ZombiePerceptionComponent->SetSenseEnabled(UAISense_Hearing::StaticClass(), bEnable);
+
+	if (bEnable)
+	{
+		ZombiePerceptionComponent->RequestStimuliListenerUpdate();
+	}
 }
 
 void AZombieAIController::SetAIMode(EZombieAIMode NewMode)

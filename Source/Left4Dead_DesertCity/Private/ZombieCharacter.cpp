@@ -151,6 +151,10 @@ void AZombieCharacter::SimpleMoveInternal(FVector TargetLocation, bool bResetRec
 
 	QualityTargetActor = nullptr;
 	bIsAttacking = false;
+	LastQualityTargetCenterLocation = FVector::ZeroVector;
+	LastQualityGoalLocation = FVector::ZeroVector;
+	LastQualityRepathTime = 0.0f;
+	bHasQualityRepathGoal = false;
 	LastSimpleTargetLocation = TargetLocation;
 	LastSimpleObservedLocation = GetActorLocation();
 	ConsecutiveSimpleStuckCount = 0;
@@ -205,6 +209,7 @@ void AZombieCharacter::QualityMove(AActor* TargetActor)
 	bIgnoreNextQualityMoveFinished = false;
 	CachedZombieAI->SetAIMode(EZombieAIMode::Quality);
 	CachedZombieAI->SetPerceptionEnabled(false);
+	CachedZombieAI->StopMovement();
 	ResetQualityStuckTracking();
 	QualityStuckGraceUntilTime = (GetWorld() ? GetWorld()->GetTimeSeconds() : 0.0f) + QualityStuckGracePeriod;
 	ResetRepeatedNavLinkTracking();
@@ -414,6 +419,7 @@ void AZombieCharacter::ZombieDeActivateSet()
 void AZombieCharacter::ZombieForceReturnToPool()
 {
 	GetWorldTimerManager().ClearTimer(DespawnTimerHandle);
+	GetWorldTimerManager().ClearTimer(QualityFailureRetryTimerHandle);
 	StopSimpleStuckCheck();
 	DisableZombieActor();
 
@@ -426,6 +432,7 @@ void AZombieCharacter::ZombieForceReturnToPool()
 void AZombieCharacter::PrepareZombieActivation()
 {
 	GetWorldTimerManager().ClearTimer(DespawnTimerHandle);
+	GetWorldTimerManager().ClearTimer(QualityFailureRetryTimerHandle);
 	StopSimpleStuckCheck();
 	if (USkeletalMeshComponent* MeshComp = GetMesh())
 	{
@@ -435,6 +442,15 @@ void AZombieCharacter::PrepareZombieActivation()
 	bIsAttacking = false;
 	QualityTargetActor.Reset();
 	ForcedQualityUntilTime = 0.0f;
+	LastQualityTargetCenterLocation = FVector::ZeroVector;
+	LastQualityGoalLocation = FVector::ZeroVector;
+	LastQualityRepathTime = 0.0f;
+	bHasQualityRepathGoal = false;
+	speed = FMath::FRandRange(400.0f, 600.0f);
+	if (UCharacterMovementComponent* MoveComp = GetCharacterMovement())
+	{
+		MoveComp->MaxWalkSpeed = speed;
+	}
 	ConsecutiveSimpleFailureCount = 0;
 	ConsecutiveSimpleStuckCount = 0;
 	SimpleStuckRecoveryAttemptCount = 0;
@@ -496,33 +512,30 @@ void AZombieCharacter::OnSimpleMoveFinished(EPathFollowingResult::Type ResultCod
 	{
 		ConsecutiveSimpleFailureCount = 0;
 		SimpleStuckRecoveryAttemptCount = 0;
-	}
-	else
-	{
-		++ConsecutiveSimpleFailureCount;
-
-		if (ConsecutiveSimpleFailureCount >= SimpleFailureCountForQuality)
+		if (OnMoveCompleted.IsBound())
 		{
-			TriggerTemporaryQualityFromSimpleBlock();
-			return;
+			TWeakObjectPtr<AZombieCharacter> WeakThis(this);
+			GetWorldTimerManager().SetTimerForNextTick(FTimerDelegate::CreateLambda([WeakThis]()
+			{
+				if (!WeakThis.IsValid())
+				{
+					return;
+				}
+
+				if (WeakThis->OnMoveCompleted.IsBound())
+				{
+					WeakThis->OnMoveCompleted.Broadcast(WeakThis.Get());
+				}
+			}));
 		}
+		return;
 	}
 
-	if (OnMoveCompleted.IsBound())
-	{
-		TWeakObjectPtr<AZombieCharacter> WeakThis(this);
-		GetWorldTimerManager().SetTimerForNextTick(FTimerDelegate::CreateLambda([WeakThis]()
-		{
-			if (!WeakThis.IsValid())
-			{
-				return;
-			}
+	++ConsecutiveSimpleFailureCount;
 
-			if (WeakThis->OnMoveCompleted.IsBound())
-			{
-				WeakThis->OnMoveCompleted.Broadcast(WeakThis.Get());
-			}
-		}));
+	if (ConsecutiveSimpleFailureCount >= SimpleFailureCountForQuality)
+	{
+		TriggerTemporaryQualityFromSimpleBlock();
 	}
 }
 
@@ -550,15 +563,15 @@ void AZombieCharacter::UpdateQualityChase(float DeltaTime)
 		return;
 	}
 
-	const float DistanceToTarget = FVector::Dist(GetActorLocation(), TargetActor->GetActorLocation());
+	const float DistanceToTargetSquared = FVector::DistSquared(GetActorLocation(), TargetActor->GetActorLocation());
 
-	if (ShouldSwitchToSimpleMode())
+	if (ShouldSwitchToSimpleMode(DistanceToTargetSquared))
 	{
 		MoveToActor(TargetActor);
 		return;
 	}
 
-	HandleQualityStuck(DeltaTime, DistanceToTarget);
+	HandleQualityStuck(DeltaTime, DistanceToTargetSquared);
 	RequestQualityRepath(false);
 }
 
@@ -576,7 +589,7 @@ bool AZombieCharacter::TryAttackCurrentTarget()
 		return false;
 	}
 
-	if (FVector::Dist(GetActorLocation(), TargetActor->GetActorLocation()) > AttackRange)
+	if (FVector::DistSquared(GetActorLocation(), TargetActor->GetActorLocation()) > FMath::Square(AttackRange))
 	{
 		return false;
 	}
@@ -617,24 +630,32 @@ void AZombieCharacter::FinishZombieAttack()
 	}
 
 	bIsAttacking = false;
+	SetActorTickEnabled(true);
+
+	if (!CachedZombieAI)
+	{
+		CachedZombieAI = Cast<AZombieAIController>(GetController());
+	}
 
 	AActor* TargetActor = QualityTargetActor.Get();
-	if (!TargetActor)
+	if (!IsValid(TargetActor))
 	{
 		TargetActor = UGameplayStatics::GetPlayerPawn(this, 0);
 	}
 
-	if (!TargetActor || !CachedZombieAI)
+	if (!IsValid(TargetActor) || !CachedZombieAI)
 	{
 		QualityTargetActor = nullptr;
 		SetActorTickEnabled(false);
 		return;
 	}
 
-	const float DistanceToTarget = FVector::Dist(GetActorLocation(), TargetActor->GetActorLocation());
-	if (DistanceToTarget <= AttackRange)
+	QualityTargetActor = TargetActor;
+	CachedZombieAI->SetAIMode(EZombieAIMode::Quality);
+	CachedZombieAI->SetPerceptionEnabled(false);
+
+	if (FVector::DistSquared(GetActorLocation(), TargetActor->GetActorLocation()) <= FMath::Square(AttackRange))
 	{
-		StartZombieAttack(TargetActor);
 		return;
 	}
 
@@ -654,26 +675,42 @@ void AZombieCharacter::RequestQualityRepath(bool bForceRepath)
 		return;
 	}
 
-	FVector CurrentGoalLocation = TargetActor->GetActorLocation();
-	if (const AZombieManager* Manager = Cast<AZombieManager>(GetOwner()))
-	{
-		CurrentGoalLocation = Manager->GetSurroundSlotLocation(this, CurrentGoalLocation);
-	}
-	const float DistanceToTarget = FVector::Dist(GetActorLocation(), CurrentGoalLocation);
+	const FVector CurrentActorLocation = GetActorLocation();
+	const FVector CurrentTargetCenterLocation = TargetActor->GetActorLocation();
+	const float DistanceToTarget = FVector::Dist(CurrentActorLocation, CurrentTargetCenterLocation);
 	const float CurrentTime = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.0f;
 	const float RepathDistance = GetQualityRepathDistanceForDistance(DistanceToTarget);
+	const float RepathDistanceSquared = FMath::Square(RepathDistance);
 	const float RepathInterval = GetQualityRepathIntervalForDistance(DistanceToTarget);
-	const bool bMovedEnough =
-		FVector::DistSquared(CurrentGoalLocation, LastQualityGoalLocation) >= FMath::Square(RepathDistance);
+	const bool bTargetMovedEnough =
+		!bHasQualityRepathGoal ||
+		FVector::DistSquared(CurrentTargetCenterLocation, LastQualityTargetCenterLocation) >= RepathDistanceSquared;
 	const bool bIntervalElapsed = (CurrentTime - LastQualityRepathTime) >= RepathInterval;
 
-	if (!bForceRepath && !bMovedEnough && !bIntervalElapsed)
+	if (!bForceRepath && !bTargetMovedEnough && !bIntervalElapsed)
 	{
 		return;
 	}
 
+	FVector CurrentGoalLocation = CurrentTargetCenterLocation;
+	if (const AZombieManager* Manager = Cast<AZombieManager>(GetOwner()))
+	{
+		CurrentGoalLocation = Manager->GetSurroundSlotLocation(this, CurrentGoalLocation);
+	}
+	const bool bGoalMovedEnough =
+		!bHasQualityRepathGoal ||
+		FVector::DistSquared(CurrentGoalLocation, LastQualityGoalLocation) >= RepathDistanceSquared;
+
+	if (!bForceRepath && !bGoalMovedEnough && CachedZombieAI->GetMoveStatus() == EPathFollowingStatus::Moving)
+	{
+		LastQualityRepathTime = CurrentTime;
+		return;
+	}
+
+	LastQualityTargetCenterLocation = CurrentTargetCenterLocation;
 	LastQualityGoalLocation = CurrentGoalLocation;
 	LastQualityRepathTime = CurrentTime;
+	bHasQualityRepathGoal = true;
 
 	CachedZombieAI->MoveToLocation(
 		CurrentGoalLocation,
@@ -685,7 +722,7 @@ void AZombieCharacter::RequestQualityRepath(bool bForceRepath)
 	);
 }
 
-bool AZombieCharacter::ShouldSwitchToSimpleMode() const
+bool AZombieCharacter::ShouldSwitchToSimpleMode(float DistanceToTargetSquared) const
 {
 	const AActor* TargetActor = QualityTargetActor.Get();
 	if (!TargetActor)
@@ -701,8 +738,7 @@ bool AZombieCharacter::ShouldSwitchToSimpleMode() const
 		}
 	}
 
-	return FVector::DistSquared(GetActorLocation(), TargetActor->GetActorLocation()) >=
-		FMath::Square(QualityExitDistance);
+	return DistanceToTargetSquared >= FMath::Square(QualityExitDistance);
 }
 
 float AZombieCharacter::GetQualityRepathIntervalForDistance(float DistanceToTarget) const
@@ -815,18 +851,19 @@ void AZombieCharacter::CheckSimpleStuck()
 	}
 
 	const FVector CurrentLocation = GetActorLocation();
-	const float MovementSinceLastCheck = FVector::Dist(CurrentLocation, LastSimpleObservedLocation);
-	const float CurrentSpeed = GetVelocity().Size();
+	const float MovementSinceLastCheckSquared = FVector::DistSquared(CurrentLocation, LastSimpleObservedLocation);
+	const float CurrentSpeedSquared = GetVelocity().SizeSquared();
 	LastSimpleObservedLocation = CurrentLocation;
 
-	const float DistanceToGoal = FVector::Dist(CurrentLocation, LastSimpleTargetLocation);
-	if (DistanceToGoal <= 100.0f)
+	const float DistanceToGoalSquared = FVector::DistSquared(CurrentLocation, LastSimpleTargetLocation);
+	if (DistanceToGoalSquared <= FMath::Square(100.0f))
 	{
 		ConsecutiveSimpleStuckCount = 0;
 		return;
 	}
 
-	if (MovementSinceLastCheck > SimpleStuckDistanceThreshold || CurrentSpeed > SimpleStuckSpeedThreshold)
+	if (MovementSinceLastCheckSquared > FMath::Square(SimpleStuckDistanceThreshold) ||
+		CurrentSpeedSquared > FMath::Square(SimpleStuckSpeedThreshold))
 	{
 		ConsecutiveSimpleStuckCount = 0;
 		return;
@@ -898,6 +935,7 @@ void AZombieCharacter::DisableZombieActor()
 	// Set this before StopMovement: stopping an active request can synchronously
 	// dispatch OnMoveCompleted, which must not restart a dead zombie.
 	bIsZombieDeactivated = true;
+	GetWorldTimerManager().ClearTimer(QualityFailureRetryTimerHandle);
 	StopSimpleStuckCheck();
 	bIsAttacking = false;
 	QualityTargetActor.Reset();
@@ -939,9 +977,9 @@ void AZombieCharacter::ResumeQualityChaseAfterNavLink()
 	RequestQualityRepath(true);
 }
 
-void AZombieCharacter::HandleQualityStuck(float DeltaTime, float DistanceToTarget)
+void AZombieCharacter::HandleQualityStuck(float DeltaTime, float DistanceToTargetSquared)
 {
-	if (!CachedZombieAI || DistanceToTarget <= QualityStuckMinDistanceToTarget)
+	if (!CachedZombieAI || DistanceToTargetSquared <= FMath::Square(QualityStuckMinDistanceToTarget))
 	{
 		ResetQualityStuckTracking();
 		return;
@@ -955,12 +993,13 @@ void AZombieCharacter::HandleQualityStuck(float DeltaTime, float DistanceToTarge
 	}
 
 	const FVector CurrentLocation = GetActorLocation();
-	const float MovementSinceLastTick = FVector::Dist(CurrentLocation, LastQualityObservedLocation);
-	const float CurrentSpeed = GetVelocity().Size();
+	const float MovementSinceLastTickSquared = FVector::DistSquared(CurrentLocation, LastQualityObservedLocation);
+	const float CurrentSpeedSquared = GetVelocity().SizeSquared();
 
 	LastQualityObservedLocation = CurrentLocation;
 
-	if (MovementSinceLastTick > QualityStuckDistanceThreshold || CurrentSpeed > QualityStuckSpeedThreshold)
+	if (MovementSinceLastTickSquared > FMath::Square(QualityStuckDistanceThreshold) ||
+		CurrentSpeedSquared > FMath::Square(QualityStuckSpeedThreshold))
 	{
 		QualityStuckTime = 0.0f;
 		return;
@@ -1116,7 +1155,8 @@ void AZombieCharacter::OnQualityMoveFinished(EPathFollowingResult::Type ResultCo
 		}
 
 		AZombieCharacter* ZombieCharacter = WeakThis.Get();
-		if (!ZombieCharacter->CachedZombieAI ||
+		if (ZombieCharacter->IsZombieDeactivated() ||
+			!ZombieCharacter->CachedZombieAI ||
 			ZombieCharacter->CachedZombieAI->GetCurrentMode() != EZombieAIMode::Quality)
 		{
 			return;
@@ -1132,8 +1172,8 @@ void AZombieCharacter::OnQualityMoveFinished(EPathFollowingResult::Type ResultCo
 		return;
 	}
 
-	FTimerHandle RetryHandle;
-	GetWorldTimerManager().SetTimer(RetryHandle, RetryDelegate, QualityFailureRetryDelay, false);
+	GetWorldTimerManager().ClearTimer(QualityFailureRetryTimerHandle);
+	GetWorldTimerManager().SetTimer(QualityFailureRetryTimerHandle, RetryDelegate, QualityFailureRetryDelay, false);
 }
 
 void AZombieCharacter::OnDespawnTimerExpired()

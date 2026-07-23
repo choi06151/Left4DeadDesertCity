@@ -100,13 +100,13 @@ protected:
 	void SimpleMoveInternal(FVector TargetLocation, bool bResetRecoveryAttempt);
 	void ConfigureActiveCollision();
 	void RequestQualityRepath(bool bForceRepath);
-	bool ShouldSwitchToSimpleMode() const;
+	bool ShouldSwitchToSimpleMode(float DistanceToTargetSquared) const;
 	float GetQualityRepathIntervalForDistance(float DistanceToTarget) const;
 	float GetQualityRepathDistanceForDistance(float DistanceToTarget) const;
 	void TriggerTemporaryQualityFromSimpleBlock();
 	void HandleSimpleStuck();
 	void ResetQualityStuckTracking();
-	void HandleQualityStuck(float DeltaTime, float DistanceToTarget);
+	void HandleQualityStuck(float DeltaTime, float DistanceToTargetSquared);
 	void StartZombieAttack(AActor* TargetActor);
 	bool TryAttackCurrentTarget();
 	void LaunchOutOfQualityStuck();
@@ -121,6 +121,7 @@ protected:
 
 	FTimerHandle DespawnTimerHandle;
 	FTimerHandle SimpleStuckCheckTimerHandle;
+	FTimerHandle QualityFailureRetryTimerHandle;
 
 private:
 	UPROPERTY()
@@ -129,6 +130,7 @@ private:
 	UPROPERTY()
 	TWeakObjectPtr<AActor> QualityTargetActor;
 
+	FVector LastQualityTargetCenterLocation = FVector::ZeroVector;
 	FVector LastQualityGoalLocation = FVector::ZeroVector;
 	FVector LastQualityObservedLocation = FVector::ZeroVector;
 	FVector LastSimpleObservedLocation = FVector::ZeroVector;
@@ -149,6 +151,7 @@ private:
 	bool bIgnoreNextQualityMoveFinished = false;
 	bool bHasQualityNavLinkContext = false;
 	bool bQualityNavLinkRecoveryTriggered = false;
+	bool bHasQualityRepathGoal = false;
 	bool bIsAttacking = false;
 	bool bIsZombieDeactivated = true;
 
@@ -282,5 +285,4 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Zombie|Movement")
 	float JumpNavLinkEndLocationTolerance = 120.0f;
 
-	AZombieAIController* AI = nullptr;
 };

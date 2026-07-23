@@ -1,5 +1,6 @@
 #include "ZombieCrowdFollowingComponent.h"
 
+#include "Engine/World.h"
 #include "NavLinkCustomInterface.h"
 #include "ZombieAIController.h"
 #include "ZombieCharacter.h"
@@ -7,8 +8,18 @@
 void UZombieCrowdFollowingComponent::StartUsingCustomLink(INavLinkCustomInterface* CustomNavLink, const FVector& DestPoint)
 {
 	ActiveCustomNavLink = CustomNavLink;
+	PendingQualityNavLink = nullptr;
+	if (UWorld* World = GetWorld())
+	{
+		World->GetTimerManager().ClearTimer(PendingQualityNavLinkTimerHandle);
+	}
 
 	Super::StartUsingCustomLink(CustomNavLink, DestPoint);
+
+	if (ActiveCustomNavLink != CustomNavLink)
+	{
+		return;
+	}
 
 	FVector StartLocation = FVector::ZeroVector;
 
@@ -20,12 +31,37 @@ void UZombieCrowdFollowingComponent::StartUsingCustomLink(INavLinkCustomInterfac
 		}
 	}
 
-	NotifyQualityNavLink(BuildNavLinkContext(StartLocation, DestPoint));
+	PendingQualityNavLink = CustomNavLink;
+	PendingQualityNavLinkContext = BuildNavLinkContext(StartLocation, DestPoint);
+
+	UWorld* World = GetWorld();
+	if (!World || QualityNavLinkActivationDelay <= 0.0f)
+	{
+		NotifyPendingQualityNavLink();
+		return;
+	}
+
+	World->GetTimerManager().SetTimer(
+		PendingQualityNavLinkTimerHandle,
+		this,
+		&UZombieCrowdFollowingComponent::NotifyPendingQualityNavLink,
+		QualityNavLinkActivationDelay,
+		false);
 }
 
 void UZombieCrowdFollowingComponent::FinishUsingCustomLink(INavLinkCustomInterface* CustomNavLink)
 {
 	Super::FinishUsingCustomLink(CustomNavLink);
+
+	if (PendingQualityNavLink == CustomNavLink)
+	{
+		if (UWorld* World = GetWorld())
+		{
+			World->GetTimerManager().ClearTimer(PendingQualityNavLinkTimerHandle);
+		}
+		PendingQualityNavLink = nullptr;
+		PendingQualityNavLinkContext = FZombieNavLinkContext();
+	}
 
 	if (ActiveCustomNavLink == CustomNavLink)
 	{
@@ -39,6 +75,21 @@ void UZombieCrowdFollowingComponent::FinishActiveCustomLink()
 	{
 		FinishUsingCustomLink(ActiveCustomNavLink);
 	}
+}
+
+void UZombieCrowdFollowingComponent::NotifyPendingQualityNavLink()
+{
+	if (!PendingQualityNavLink || PendingQualityNavLink != ActiveCustomNavLink)
+	{
+		PendingQualityNavLink = nullptr;
+		PendingQualityNavLinkContext = FZombieNavLinkContext();
+		return;
+	}
+
+	const FZombieNavLinkContext NavLinkContext = PendingQualityNavLinkContext;
+	PendingQualityNavLink = nullptr;
+	PendingQualityNavLinkContext = FZombieNavLinkContext();
+	NotifyQualityNavLink(NavLinkContext);
 }
 
 EZombieSmartNavLinkType UZombieCrowdFollowingComponent::ResolveLinkType(

@@ -334,6 +334,12 @@ void AZombieManager::ApplyMoveFocusToActiveZombies(bool bForceRequest)
 		if (Zombie && !Zombie->IsHidden() &&
 			!InitialWaitingZombies.Contains(Zombie) && !Zombie->IsZombieAttacking())
 		{
+			if (const AZombieAIController* AICon = Cast<AZombieAIController>(Zombie->GetController());
+				AICon && AICon->GetCurrentMode() == EZombieAIMode::Quality)
+			{
+				continue;
+			}
+
 			if (ZombieMoveFocusActor.IsValid())
 			{
 				Zombie->MoveToActor(ZombieMoveFocusActor.Get());
@@ -365,6 +371,11 @@ void AZombieManager::MaintainActorMoveFocus()
 
 		AZombieAIController* AICon = Cast<AZombieAIController>(Zombie->GetController());
 		if (!AICon || AICon->GetMoveStatus() == EPathFollowingStatus::Moving)
+		{
+			continue;
+		}
+
+		if (AICon->GetCurrentMode() == EZombieAIMode::Quality)
 		{
 			continue;
 		}
@@ -774,6 +785,51 @@ bool AZombieManager::ActivateZombie(AZombieCharacter* Zombie, bool bLaunchOnActi
 				? GetMoveFocusLocation()
 				: Player->GetActorLocation());
 		}
+	}
+	else
+	{
+		TWeakObjectPtr<AZombieManager> WeakManager(this);
+		TWeakObjectPtr<AZombieCharacter> WeakZombie(Zombie);
+		TWeakObjectPtr<AActor> WeakMoveFocusActor(ZombieMoveFocusActor.Get());
+		const bool bUseMoveFocus = bZombieMoveFocusActive;
+		const FVector DeferredMoveFocusLocation = GetMoveFocusLocation();
+
+		GetWorldTimerManager().SetTimerForNextTick(FTimerDelegate::CreateLambda(
+			[WeakManager, WeakZombie, WeakMoveFocusActor, bUseMoveFocus, DeferredMoveFocusLocation]()
+		{
+			if (!WeakManager.IsValid() || !WeakZombie.IsValid())
+			{
+				return;
+			}
+
+			AZombieManager* ZombieManager = WeakManager.Get();
+			AZombieCharacter* DeferredZombie = WeakZombie.Get();
+			if (DeferredZombie->IsZombieDeactivated())
+			{
+				return;
+			}
+
+			if (AZombieAIController* DeferredAI = Cast<AZombieAIController>(DeferredZombie->GetController()))
+			{
+				DeferredAI->SetAIMode(EZombieAIMode::Simple);
+			}
+
+			if (bUseMoveFocus)
+			{
+				if (WeakMoveFocusActor.IsValid())
+				{
+					DeferredZombie->MoveToActor(WeakMoveFocusActor.Get());
+				}
+				else
+				{
+					DeferredZombie->SimpleMove(DeferredMoveFocusLocation);
+				}
+			}
+			else if (ZombieManager->Player)
+			{
+				DeferredZombie->SimpleMove(ZombieManager->Player->GetActorLocation());
+			}
+		}));
 	}
 
 	return true;
