@@ -22,6 +22,7 @@ void AZombieManager::BeginPlay()
 
 	Player = UGameplayStatics::GetPlayerPawn(this, 0);
 	CollectInitialSpawnTargetPoints();
+	AdoptLevelPlacedZombies();
 	InitializeZombies();
 	// Initial level placement is a staging state. A wave controller must call
 	// SetZombieWaveIndex(1+) before these zombies receive movement commands.
@@ -39,11 +40,18 @@ void AZombieManager::Tick(float DeltaTime)
 {
 	Super::Tick(DeltaTime);
 
-	// A wave may already be running when the player approaches another staged
-	// zombie. Re-evaluate only while initial idle zombies remain.
-	if (InitialWaitingZombies.Num() > 0 && GetActiveZombieCount() < DesiredActiveZombieCount)
+	if (CurrentWaveIndex > 0 && GetActiveZombieCount() < FMath::Min(DesiredActiveZombieCount, Zombies.Num()))
 	{
-		MaintainZombiePopulation();
+		WaveRefillElapsedTime += DeltaTime;
+		if (WaveRefillElapsedTime >= FMath::Max(0.01f, WaveRefillInterval))
+		{
+			WaveRefillElapsedTime = 0.0f;
+			MaintainZombiePopulation(FMath::Max(1, WaveRefillBatchSize), true);
+		}
+	}
+	else
+	{
+		WaveRefillElapsedTime = 0.0f;
 	}
 
 	if (bZombieMoveFocusActive && ZombieMoveFocusActor.IsValid())
@@ -74,7 +82,7 @@ void AZombieManager::InitializeZombies()
 	}
 
 	const int32 InitialPoolCount = FMath::Min(InitialPooledZombieCount, MaxPooledZombieCount);
-	for (int32 i = 0; i < InitialPoolCount; i++)
+	while (Zombies.Num() < InitialPoolCount)
 	{
 		if (!TrySpawnInitialWaitingZombie())
 		{
@@ -85,45 +93,147 @@ void AZombieManager::InitializeZombies()
 
 void AZombieManager::SpawnZombie()
 {
-	if (!Player || Zombies.Num() == 0)
+	if (CurrentWaveIndex <= 0 || DesiredActiveZombieCount <= 0)
+	{
+		UE_LOG(LogTemp, Verbose,
+			TEXT("SpawnZombie ignored because no wave is active. Wave=%d Active=%d Desired=%d"),
+			CurrentWaveIndex,
+			GetActiveZombieCount(),
+			DesiredActiveZombieCount);
+		return;
+	}
+
+	const int32 TargetActiveZombieCount = FMath::Min(DesiredActiveZombieCount, Zombies.Num());
+	if (GetActiveZombieCount() >= TargetActiveZombieCount)
 	{
 		return;
 	}
 
-	// Zombies created at level start wait visibly on TargetPoints. Consume them
-	// in that same order before reusing zombies that died and entered the pool.
-	if (InitialWaitingZombies.Num() > 0)
+	const float CurrentTime = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.0f;
+	const float MinSpawnInterval = FMath::Max(0.01f, WaveRefillInterval);
+	if (CurrentTime - LastManualSpawnRequestTime < MinSpawnInterval)
 	{
-		if (ActivateInitialWaitingZombie())
-		{
-			CurrentSpawnedZombieCount = GetActiveZombieCount();
-		}
-
-		// Initial TargetPoint zombies must be consumed by proximity before dead
-		// pooled zombies begin using the random around-player spawn path.
 		return;
 	}
 
-	AZombieCharacter* TargetZombie = nullptr;
-	for (const TWeakObjectPtr<AZombieCharacter>& ZombiePtr : Zombies)
+	LastManualSpawnRequestTime = CurrentTime;
+	MaintainZombiePopulation(1, false);
+}
+
+void AZombieManager::SpawnZombieInternal(bool bLaunchOnActivation)
+{
+	if (!Player)
 	{
-		AZombieCharacter* Zombie = ZombiePtr.Get();
-		if (Zombie && Zombie->IsHidden())
-		{
-			TargetZombie = Zombie;
-			break;
-		}
+		return;
 	}
 
+	if (Zombies.Num() == 0)
+	{
+		EnsureZombiePoolSize(1);
+	}
+
+	AZombieCharacter* TargetZombie = TakeAvailablePooledZombie(CurrentWaveIndex > 0);
 	if (!TargetZombie)
 	{
 		return;
 	}
 
-	const FVector PlayerLocation = Player->GetActorLocation();
 	FVector SpawnLocation = FVector::ZeroVector;
-	bool bSpatialQuerySuccess = false;
+	if (!FindSpawnLocationAroundPlayer(TargetZombie, SpawnLocation))
+	{
+		UE_LOG(LogTemp, Warning, TEXT("Zombie spawn validation failed after %d attempts."), SpawnMaxAttempts);
+		return;
+	}
 
+	if (UCapsuleComponent* Capsule = TargetZombie->GetCapsuleComponent())
+	{
+		// DisableZombieActor clears every response for pooling, so restore the
+		// active collision profile before showing or launching the zombie again.
+		Capsule->SetCollisionProfileName(TEXT("Pawn"));
+		Capsule->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
+		Capsule->SetCollisionObjectType(ECC_GameTraceChannel3);
+		Capsule->SetCollisionResponseToChannel(ECC_GameTraceChannel3, ECR_Overlap);
+		SpawnLocation.Z += Capsule->GetScaledCapsuleHalfHeight();
+	}
+
+	const FVector ToPlayer = Player->GetActorLocation() - SpawnLocation;
+	FRotator SpawnRotation = ToPlayer.Rotation();
+	SpawnRotation.Pitch = 0.0f;
+	SpawnRotation.Roll = 0.0f;
+
+	TargetZombie->SetActorLocationAndRotation(SpawnLocation, SpawnRotation);
+	ActivateZombie(TargetZombie, bLaunchOnActivation);
+	CurrentSpawnedZombieCount = GetActiveZombieCount();
+}
+
+void AZombieManager::EnsureZombiePoolSize(int32 DesiredPoolSize)
+{
+	const int32 ClampedDesiredPoolSize = FMath::Clamp(DesiredPoolSize, 0, MaxPooledZombieCount);
+	while (Zombies.Num() < ClampedDesiredPoolSize)
+	{
+		if (!TrySpawnInitialWaitingZombie())
+		{
+			break;
+		}
+	}
+}
+
+AZombieCharacter* AZombieManager::TakeAvailablePooledZombie(bool bAllowForceRecycleDeactivated)
+{
+	for (int32 Index = InitialWaitingZombies.Num() - 1; Index >= 0; --Index)
+	{
+		AZombieCharacter* Zombie = InitialWaitingZombies[Index].Get();
+		if (!Zombie)
+		{
+			InitialWaitingZombies.RemoveAt(Index);
+			continue;
+		}
+
+		InitialWaitingZombies.RemoveAt(Index);
+		return Zombie;
+	}
+
+	for (const TWeakObjectPtr<AZombieCharacter>& ZombiePtr : Zombies)
+	{
+		AZombieCharacter* Zombie = ZombiePtr.Get();
+		if (Zombie && Zombie->IsHidden())
+		{
+			DeactivatedZombiesAwaitingPool.Remove(Zombie);
+			return Zombie;
+		}
+	}
+
+	if (bAllowForceRecycleDeactivated)
+	{
+		for (int32 Index = 0; Index < DeactivatedZombiesAwaitingPool.Num();)
+		{
+			AZombieCharacter* Zombie = DeactivatedZombiesAwaitingPool[Index].Get();
+			if (!Zombie)
+			{
+				DeactivatedZombiesAwaitingPool.RemoveAt(Index);
+				continue;
+			}
+
+			DeactivatedZombiesAwaitingPool.RemoveAt(Index);
+			if (Zombie->IsZombieDeactivated())
+			{
+				Zombie->ZombieForceReturnToPool();
+				return Zombie;
+			}
+		}
+	}
+
+	return nullptr;
+}
+
+bool AZombieManager::FindSpawnLocationAroundPlayer(AZombieCharacter* TargetZombie, FVector& OutSpawnLocation) const
+{
+	if (!Player || !TargetZombie || !GetWorld())
+	{
+		return false;
+	}
+
+	const FVector PlayerLocation = Player->GetActorLocation();
 	if (UNavigationSystemV1* NavSys = FNavigationSystem::GetCurrent<UNavigationSystemV1>(GetWorld()))
 	{
 		for (int32 Try = 0; Try < SpawnMaxAttempts; ++Try)
@@ -159,38 +269,17 @@ void AZombieManager::SpawnZombie()
 				continue;
 			}
 
-			SpawnLocation = Hit.Location;
-
-			if (!IsSpawnLocationValid(SpawnLocation, TargetZombie))
+			if (!IsSpawnLocationValid(Hit.Location, TargetZombie))
 			{
 				continue;
 			}
 
-			bSpatialQuerySuccess = true;
-			break;
+			OutSpawnLocation = Hit.Location;
+			return true;
 		}
 	}
 
-	if (!bSpatialQuerySuccess)
-	{
-		UE_LOG(LogTemp, Warning, TEXT("Zombie spawn validation failed after %d attempts."), SpawnMaxAttempts);
-		return;
-	}
-
-	if (UCapsuleComponent* Capsule = TargetZombie->GetCapsuleComponent())
-	{
-		// DisableZombieActor clears every response for pooling, so restore the
-		// active collision profile before showing or launching the zombie again.
-		Capsule->SetCollisionProfileName(TEXT("Pawn"));
-		Capsule->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
-		Capsule->SetCollisionObjectType(ECC_GameTraceChannel3);
-		Capsule->SetCollisionResponseToChannel(ECC_GameTraceChannel3, ECR_Overlap);
-		SpawnLocation.Z += Capsule->GetScaledCapsuleHalfHeight();
-	}
-
-	TargetZombie->SetActorLocationAndRotation(SpawnLocation, FRotator::ZeroRotator);
-	ActivateZombie(TargetZombie, true);
-	CurrentSpawnedZombieCount = GetActiveZombieCount();
+	return false;
 }
 
 void AZombieManager::DeSpawnZombie(AZombieCharacter* Zombie)
@@ -200,6 +289,8 @@ void AZombieManager::DeSpawnZombie(AZombieCharacter* Zombie)
 		return;
 	}
 
+	InitialWaitingZombies.Remove(Zombie);
+	DeactivatedZombiesAwaitingPool.Remove(Zombie);
 	Zombie->SetActorHiddenInGame(true);
 	Zombie->SetActorEnableCollision(false);
 	Zombie->SetActorLocation(FVector(0.0f, 0.0f, -10000.0f));
@@ -208,9 +299,69 @@ void AZombieManager::DeSpawnZombie(AZombieCharacter* Zombie)
 
 void AZombieManager::SetZombieWaveIndex(int32 WaveIndex)
 {
+	const int32 PreviousWaveIndex = CurrentWaveIndex;
 	CurrentWaveIndex = FMath::Clamp(WaveIndex, 0, 6);
 	DesiredActiveZombieCount = ResolveDesiredActiveZombieCount(CurrentWaveIndex);
-	MaintainZombiePopulation();
+
+	if (CurrentWaveIndex > 0)
+	{
+		EnsureZombiePoolSize(DesiredActiveZombieCount);
+	}
+
+	const int32 TrimmedCount = TrimActiveZombiesToDesiredCount();
+	const int32 ActiveCountAfterTrim = GetActiveZombieCount();
+	if (CurrentWaveIndex > 0 && CurrentWaveIndex == PreviousWaveIndex && ActiveCountAfterTrim > 0)
+	{
+		CurrentSpawnedZombieCount = ActiveCountAfterTrim;
+		UE_LOG(LogTemp, Verbose,
+			TEXT("Duplicate zombie wave request ignored: RequestedWave=%d Wave=%d DesiredActive=%d Active=%d Trimmed=%d"),
+			WaveIndex,
+			CurrentWaveIndex,
+			DesiredActiveZombieCount,
+			ActiveCountAfterTrim,
+			TrimmedCount);
+		return;
+	}
+
+	WaveRefillElapsedTime = 0.0f;
+	LastManualSpawnRequestTime = -FLT_MAX;
+
+	const int32 InitialSpawnCount = CurrentWaveIndex > 0
+		? FMath::Min(FMath::Max(0, WaveActivationBurstCount), DesiredActiveZombieCount)
+		: 0;
+	MaintainZombiePopulation(InitialSpawnCount, CurrentWaveIndex > 0);
+
+	if (CurrentWaveIndex > 0)
+	{
+		ApplyWaveSpeedBoostToActiveZombies();
+	}
+
+	UE_LOG(LogTemp, Log,
+		TEXT("Zombie wave set: RequestedWave=%d Wave=%d DesiredActive=%d InitialBurst=%d LegacyBurst=%d RefillBatch=%d RefillInterval=%.2f Active=%d Pool=%d Waiting=%d Deactivated=%d Trimmed=%d"),
+		WaveIndex,
+		CurrentWaveIndex,
+		DesiredActiveZombieCount,
+		InitialSpawnCount,
+		WaveStartBurstCount,
+		WaveRefillBatchSize,
+		WaveRefillInterval,
+		GetActiveZombieCount(),
+		Zombies.Num(),
+		InitialWaitingZombies.Num(),
+		GetDeactivatedAwaitingPoolCount(),
+		TrimmedCount);
+}
+
+void AZombieManager::NotifyZombieDeactivated(AZombieCharacter* Zombie)
+{
+	if (!Zombie || DeactivatedZombiesAwaitingPool.Contains(Zombie))
+	{
+		return;
+	}
+
+	InitialWaitingZombies.Remove(Zombie);
+	DeactivatedZombiesAwaitingPool.Add(Zombie);
+	CurrentSpawnedZombieCount = GetActiveZombieCount();
 }
 
 void AZombieManager::ReportPlayerGunshot(float Loudness)
@@ -304,7 +455,7 @@ void AZombieManager::ClearZombieMoveFocus()
 	for (const TWeakObjectPtr<AZombieCharacter>& ZombiePtr : Zombies)
 	{
 		AZombieCharacter* Zombie = ZombiePtr.Get();
-		if (Zombie && !Zombie->IsHidden() && !InitialWaitingZombies.Contains(Zombie))
+		if (IsActiveZombie(Zombie))
 		{
 			ResumeNormalMovement(Zombie);
 		}
@@ -331,8 +482,7 @@ void AZombieManager::ApplyMoveFocusToActiveZombies(bool bForceRequest)
 	for (const TWeakObjectPtr<AZombieCharacter>& ZombiePtr : Zombies)
 	{
 		AZombieCharacter* Zombie = ZombiePtr.Get();
-		if (Zombie && !Zombie->IsHidden() &&
-			!InitialWaitingZombies.Contains(Zombie) && !Zombie->IsZombieAttacking())
+		if (IsActiveZombie(Zombie) && !Zombie->IsZombieAttacking())
 		{
 			if (const AZombieAIController* AICon = Cast<AZombieAIController>(Zombie->GetController());
 				AICon && AICon->GetCurrentMode() == EZombieAIMode::Quality)
@@ -352,6 +502,23 @@ void AZombieManager::ApplyMoveFocusToActiveZombies(bool bForceRequest)
 	}
 }
 
+void AZombieManager::ApplyWaveSpeedBoostToActiveZombies()
+{
+	if (WaveSpeedBoostMultiplier <= 1.0f || WaveSpeedBoostDuration <= 0.0f)
+	{
+		return;
+	}
+
+	for (const TWeakObjectPtr<AZombieCharacter>& ZombiePtr : Zombies)
+	{
+		AZombieCharacter* Zombie = ZombiePtr.Get();
+		if (IsActiveZombie(Zombie))
+		{
+			Zombie->ApplyTemporarySpeedBoost(WaveSpeedBoostMultiplier, WaveSpeedBoostDuration);
+		}
+	}
+}
+
 void AZombieManager::MaintainActorMoveFocus()
 {
 	if (!bZombieMoveFocusActive || !ZombieMoveFocusActor.IsValid())
@@ -363,8 +530,7 @@ void AZombieManager::MaintainActorMoveFocus()
 	for (const TWeakObjectPtr<AZombieCharacter>& ZombiePtr : Zombies)
 	{
 		AZombieCharacter* Zombie = ZombiePtr.Get();
-		if (!Zombie || Zombie->IsHidden() ||
-			InitialWaitingZombies.Contains(Zombie) || Zombie->IsZombieAttacking())
+		if (!IsActiveZombie(Zombie) || Zombie->IsZombieAttacking())
 		{
 			continue;
 		}
@@ -523,21 +689,88 @@ FVector AZombieManager::GetSurroundSlotLocation(
 	return DesiredLocation;
 }
 
-void AZombieManager::MaintainZombiePopulation()
+void AZombieManager::MaintainZombiePopulation(int32 MaxSpawnCount, bool bLaunchOnActivation)
 {
+	if (MaxSpawnCount <= 0)
+	{
+		return;
+	}
+
 	const int32 TargetActiveZombieCount = FMath::Min(DesiredActiveZombieCount, Zombies.Num());
 	CurrentSpawnedZombieCount = GetActiveZombieCount();
 
-	while (CurrentSpawnedZombieCount < TargetActiveZombieCount)
+	int32 SpawnCount = 0;
+	while (CurrentSpawnedZombieCount < TargetActiveZombieCount && SpawnCount < MaxSpawnCount)
 	{
 		const int32 ActiveCountBeforeSpawn = CurrentSpawnedZombieCount;
-		SpawnZombie();
+		SpawnZombieInternal(bLaunchOnActivation);
 
 		if (CurrentSpawnedZombieCount <= ActiveCountBeforeSpawn)
 		{
 			break;
 		}
+
+		++SpawnCount;
 	}
+}
+
+bool AZombieManager::IsActiveZombie(const AZombieCharacter* Zombie) const
+{
+	return Zombie &&
+		!Zombie->IsHidden() &&
+		!Zombie->IsZombieDeactivated() &&
+		!InitialWaitingZombies.Contains(Zombie);
+}
+
+bool AZombieManager::IsAvailablePooledZombie(const AZombieCharacter* Zombie) const
+{
+	return Zombie && (Zombie->IsHidden() || InitialWaitingZombies.Contains(Zombie));
+}
+
+int32 AZombieManager::TrimActiveZombiesToDesiredCount()
+{
+	const int32 TargetActiveZombieCount = FMath::Clamp(DesiredActiveZombieCount, 0, Zombies.Num());
+	int32 ActiveZombieCount = GetActiveZombieCount();
+	int32 TrimmedZombieCount = 0;
+
+	if (ActiveZombieCount <= TargetActiveZombieCount)
+	{
+		return TrimmedZombieCount;
+	}
+
+	const FVector ReferenceLocation = Player ? Player->GetActorLocation() : GetActorLocation();
+	while (ActiveZombieCount > TargetActiveZombieCount)
+	{
+		AZombieCharacter* FarthestZombie = nullptr;
+		float FarthestDistanceSquared = -1.0f;
+
+		for (const TWeakObjectPtr<AZombieCharacter>& ZombiePtr : Zombies)
+		{
+			AZombieCharacter* Zombie = ZombiePtr.Get();
+			if (!IsActiveZombie(Zombie))
+			{
+				continue;
+			}
+
+			const float DistanceSquared = FVector::DistSquared(Zombie->GetActorLocation(), ReferenceLocation);
+			if (DistanceSquared > FarthestDistanceSquared)
+			{
+				FarthestDistanceSquared = DistanceSquared;
+				FarthestZombie = Zombie;
+			}
+		}
+
+		if (!FarthestZombie)
+		{
+			break;
+		}
+
+		FarthestZombie->ZombieForceReturnToPool();
+		++TrimmedZombieCount;
+		ActiveZombieCount = GetActiveZombieCount();
+	}
+
+	return TrimmedZombieCount;
 }
 
 int32 AZombieManager::GetActiveZombieCount() const
@@ -547,7 +780,7 @@ int32 AZombieManager::GetActiveZombieCount() const
 	for (const TWeakObjectPtr<AZombieCharacter>& ZombiePtr : Zombies)
 	{
 		const AZombieCharacter* Zombie = ZombiePtr.Get();
-		if (Zombie && !Zombie->IsHidden() && !InitialWaitingZombies.Contains(Zombie))
+		if (IsActiveZombie(Zombie))
 		{
 			++ActiveZombieCount;
 		}
@@ -556,17 +789,107 @@ int32 AZombieManager::GetActiveZombieCount() const
 	return ActiveZombieCount;
 }
 
+int32 AZombieManager::GetTotalPooledZombieCount() const
+{
+	int32 TotalPooledZombieCount = 0;
+
+	for (const TWeakObjectPtr<AZombieCharacter>& ZombiePtr : Zombies)
+	{
+		if (ZombiePtr.IsValid())
+		{
+			++TotalPooledZombieCount;
+		}
+	}
+
+	return TotalPooledZombieCount;
+}
+
+int32 AZombieManager::GetWaitingPooledZombieCount() const
+{
+	int32 WaitingPooledZombieCount = 0;
+
+	for (const TWeakObjectPtr<AZombieCharacter>& ZombiePtr : InitialWaitingZombies)
+	{
+		if (ZombiePtr.IsValid())
+		{
+			++WaitingPooledZombieCount;
+		}
+	}
+
+	return WaitingPooledZombieCount;
+}
+
+int32 AZombieManager::GetHiddenPooledZombieCount() const
+{
+	int32 HiddenPooledZombieCount = 0;
+
+	for (const TWeakObjectPtr<AZombieCharacter>& ZombiePtr : Zombies)
+	{
+		const AZombieCharacter* Zombie = ZombiePtr.Get();
+		if (Zombie && Zombie->IsHidden())
+		{
+			++HiddenPooledZombieCount;
+		}
+	}
+
+	return HiddenPooledZombieCount;
+}
+
+int32 AZombieManager::GetAvailablePooledZombieCount() const
+{
+	int32 AvailablePooledZombieCount = 0;
+
+	for (const TWeakObjectPtr<AZombieCharacter>& ZombiePtr : Zombies)
+	{
+		const AZombieCharacter* Zombie = ZombiePtr.Get();
+		if (IsAvailablePooledZombie(Zombie))
+		{
+			++AvailablePooledZombieCount;
+		}
+	}
+
+	return AvailablePooledZombieCount;
+}
+
+int32 AZombieManager::GetDeactivatedAwaitingPoolCount() const
+{
+	int32 DeactivatedAwaitingPoolCount = 0;
+
+	for (const TWeakObjectPtr<AZombieCharacter>& ZombiePtr : DeactivatedZombiesAwaitingPool)
+	{
+		const AZombieCharacter* Zombie = ZombiePtr.Get();
+		if (Zombie && Zombie->IsZombieDeactivated() && !Zombie->IsHidden())
+		{
+			++DeactivatedAwaitingPoolCount;
+		}
+	}
+
+	return DeactivatedAwaitingPoolCount;
+}
+
+FZombieManagerDebugStats AZombieManager::GetZombieDebugStats() const
+{
+	FZombieManagerDebugStats Stats;
+	Stats.CurrentWaveIndex = CurrentWaveIndex;
+	Stats.DesiredActiveZombieCount = DesiredActiveZombieCount;
+	Stats.WaveStartBurstCount = WaveStartBurstCount;
+	Stats.WaveActivationBurstCount = WaveActivationBurstCount;
+	Stats.WaveRefillBatchSize = WaveRefillBatchSize;
+	Stats.WaveRefillInterval = WaveRefillInterval;
+	Stats.ActiveZombieCount = GetActiveZombieCount();
+	Stats.CurrentSpawnedZombieCount = CurrentSpawnedZombieCount;
+	Stats.TotalPooledZombieCount = GetTotalPooledZombieCount();
+	Stats.MaxPooledZombieCount = MaxPooledZombieCount;
+	Stats.WaitingPooledZombieCount = GetWaitingPooledZombieCount();
+	Stats.HiddenPooledZombieCount = GetHiddenPooledZombieCount();
+	Stats.AvailablePooledZombieCount = GetAvailablePooledZombieCount();
+	Stats.DeactivatedAwaitingPoolCount = GetDeactivatedAwaitingPoolCount();
+	return Stats;
+}
+
 int32 AZombieManager::ResolveDesiredActiveZombieCount(int32 WaveIndex) const
 {
-	switch (WaveIndex)
-	{
-	case 0:
-		return 0;
-	case 1:
-		return 5;
-	default:
-		return 15 + ((WaveIndex - 2) * 5);
-	}
+	return WaveIndex > 0 ? WaveIndex * 15 : 0;
 }
 
 void AZombieManager::SchedulePoolWarmup()
@@ -602,7 +925,8 @@ void AZombieManager::WarmupZombiePool()
 		}
 	}
 
-	MaintainZombiePopulation();
+	// Pool warmup only increases available pooled actors. Active wave refill is
+	// throttled by Tick through WaveRefillInterval/WaveRefillBatchSize.
 }
 
 void AZombieManager::CollectInitialSpawnTargetPoints()
@@ -629,6 +953,48 @@ void AZombieManager::CollectInitialSpawnTargetPoints()
 		InitialSpawnTargetPoints.Num());
 }
 
+void AZombieManager::AdoptLevelPlacedZombies()
+{
+	TArray<AActor*> FoundActors;
+	UGameplayStatics::GetAllActorsOfClass(this, AZombieCharacter::StaticClass(), FoundActors);
+
+	int32 AdoptedCount = 0;
+	int32 HiddenOverflowCount = 0;
+	for (AActor* Actor : FoundActors)
+	{
+		AZombieCharacter* Zombie = Cast<AZombieCharacter>(Actor);
+		if (!Zombie || Zombies.Contains(Zombie))
+		{
+			continue;
+		}
+
+		Zombie->SetOwner(this);
+		Zombie->PrepareZombiePoolIdleState();
+
+		if (Zombies.Num() < MaxPooledZombieCount)
+		{
+			Zombies.Add(Zombie);
+			InitialWaitingZombies.Add(Zombie);
+			Zombie->OnMoveCompleted.AddUniqueDynamic(this, &AZombieManager::OnZombieArrived);
+			++AdoptedCount;
+		}
+		else
+		{
+			++HiddenOverflowCount;
+		}
+	}
+
+	if (AdoptedCount > 0 || HiddenOverflowCount > 0)
+	{
+		UE_LOG(LogTemp, Log,
+			TEXT("ZombieManager adopted level-placed zombies: Adopted=%d HiddenOverflow=%d Pool=%d MaxPool=%d"),
+			AdoptedCount,
+			HiddenOverflowCount,
+			Zombies.Num(),
+			MaxPooledZombieCount);
+	}
+}
+
 bool AZombieManager::TrySpawnInitialWaitingZombie()
 {
 	if (!ZombieClassSlot)
@@ -642,28 +1008,25 @@ bool AZombieManager::TrySpawnInitialWaitingZombie()
 		return false;
 	}
 
-	if (!InitialSpawnTargetPoints.IsValidIndex(NextInitialSpawnTargetPointIndex))
-	{
-		UE_LOG(LogTemp, Warning,
-			TEXT("Zombie pool warmup stopped: TargetPoints=%d, requested zombies=%d. Add more TargetPoints to the level."),
-			InitialSpawnTargetPoints.Num(), MaxPooledZombieCount);
-		return false;
-	}
-
 	FActorSpawnParameters SpawnParams;
 	SpawnParams.Owner = this;
 	SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
 
-	ATargetPoint* SpawnPoint = InitialSpawnTargetPoints[NextInitialSpawnTargetPointIndex];
-	if (!IsValid(SpawnPoint))
+	FVector SpawnLocation(0.0f, 0.0f, -10000.0f - static_cast<float>(Zombies.Num()) * 100.0f);
+	FRotator SpawnRotation = FRotator::ZeroRotator;
+	while (InitialSpawnTargetPoints.IsValidIndex(NextInitialSpawnTargetPointIndex))
 	{
+		ATargetPoint* SpawnPoint = InitialSpawnTargetPoints[NextInitialSpawnTargetPointIndex];
 		++NextInitialSpawnTargetPointIndex;
-		return false;
-	}
 
-	FVector SpawnLocation = SpawnPoint->GetActorLocation();
-	SpawnLocation.Z += InitialSpawnHeightOffset;
-	const FRotator SpawnRotation = SpawnPoint->GetActorRotation();
+		if (IsValid(SpawnPoint))
+		{
+			SpawnLocation = SpawnPoint->GetActorLocation();
+			SpawnLocation.Z += InitialSpawnHeightOffset;
+			SpawnRotation = SpawnPoint->GetActorRotation();
+			break;
+		}
+	}
 
 	AZombieCharacter* NewZombie = World->SpawnActor<AZombieCharacter>(
 		ZombieClassSlot,
@@ -675,38 +1038,14 @@ bool AZombieManager::TrySpawnInitialWaitingZombie()
 	{
 		return false;
 	}
-	++NextInitialSpawnTargetPointIndex;
-
 	Zombies.Add(NewZombie);
 	InitialWaitingZombies.Add(NewZombie);
-	NewZombie->OnMoveCompleted.AddDynamic(this, &AZombieManager::OnZombieArrived);
-	NewZombie->SetActorHiddenInGame(false);
-	NewZombie->SetActorEnableCollision(true);
-
-	if (UCapsuleComponent* Capsule = NewZombie->GetCapsuleComponent())
-	{
-		Capsule->SetCollisionProfileName(TEXT("Pawn"));
-		Capsule->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
-		Capsule->SetCollisionObjectType(ECC_GameTraceChannel3);
-		Capsule->SetCollisionResponseToChannel(ECC_GameTraceChannel3, ECR_Overlap);
-	}
-
-	if (AZombieAIController* AICon = Cast<AZombieAIController>(NewZombie->GetController()))
-	{
-		AICon->StopMovement();
-		AICon->SetPerceptionEnabled(false);
-	}
-
-	if (UCharacterMovementComponent* MoveComp = NewZombie->GetCharacterMovement())
-	{
-		MoveComp->StopMovementImmediately();
-		MoveComp->SetMovementMode(MOVE_Walking);
-		MoveComp->SetComponentTickEnabled(false);
-	}
+	NewZombie->OnMoveCompleted.AddUniqueDynamic(this, &AZombieManager::OnZombieArrived);
+	NewZombie->PrepareZombiePoolIdleState();
 	return true;
 }
 
-bool AZombieManager::ActivateInitialWaitingZombie()
+bool AZombieManager::ActivateInitialWaitingZombie(bool bIgnoreActivationDistance)
 {
 	if (!Player)
 	{
@@ -715,8 +1054,10 @@ bool AZombieManager::ActivateInitialWaitingZombie()
 
 	const FVector PlayerLocation = Player->GetActorLocation();
 	const float ActivationDistanceSquared = FMath::Square(FMath::Max(0.0f, InitialIdleActivationDistance));
+	int32 SelectedWaitingIndex = INDEX_NONE;
+	float SelectedDistanceSquared = TNumericLimits<float>::Max();
 
-	for (int32 Index = 0; Index < InitialWaitingZombies.Num();)
+	for (int32 Index = InitialWaitingZombies.Num() - 1; Index >= 0; --Index)
 	{
 		AZombieCharacter* Zombie = InitialWaitingZombies[Index].Get();
 		if (!Zombie)
@@ -725,16 +1066,23 @@ bool AZombieManager::ActivateInitialWaitingZombie()
 			continue;
 		}
 
-		if (FVector::DistSquared2D(Zombie->GetActorLocation(), PlayerLocation) <= ActivationDistanceSquared)
+		const float DistanceSquared = FVector::DistSquared2D(Zombie->GetActorLocation(), PlayerLocation);
+		if ((bIgnoreActivationDistance || DistanceSquared <= ActivationDistanceSquared) &&
+			DistanceSquared < SelectedDistanceSquared)
 		{
-			InitialWaitingZombies.RemoveAt(Index);
-			return ActivateZombie(Zombie, false);
+			SelectedDistanceSquared = DistanceSquared;
+			SelectedWaitingIndex = Index;
 		}
-
-		++Index;
 	}
 
-	return false;
+	if (SelectedWaitingIndex == INDEX_NONE)
+	{
+		return false;
+	}
+
+	AZombieCharacter* Zombie = InitialWaitingZombies[SelectedWaitingIndex].Get();
+	InitialWaitingZombies.RemoveAt(SelectedWaitingIndex);
+	return ActivateZombie(Zombie, bIgnoreActivationDistance);
 }
 
 bool AZombieManager::ActivateZombie(AZombieCharacter* Zombie, bool bLaunchOnActivation)
@@ -778,6 +1126,10 @@ bool AZombieManager::ActivateZombie(AZombieCharacter* Zombie, bool bLaunchOnActi
 		if (bZombieMoveFocusActive && ZombieMoveFocusActor.IsValid())
 		{
 			Zombie->MoveToActor(ZombieMoveFocusActor.Get());
+		}
+		else if (!bZombieMoveFocusActive && Player)
+		{
+			Zombie->MoveToActor(Player);
 		}
 		else
 		{
@@ -827,7 +1179,7 @@ bool AZombieManager::ActivateZombie(AZombieCharacter* Zombie, bool bLaunchOnActi
 			}
 			else if (ZombieManager->Player)
 			{
-				DeferredZombie->SimpleMove(ZombieManager->Player->GetActorLocation());
+				DeferredZombie->MoveToActor(ZombieManager->Player);
 			}
 		}));
 	}

@@ -38,6 +38,16 @@ void AZombieCharacter::ConfigureActiveCollision()
 		Capsule->SetCollisionObjectType(ECC_GameTraceChannel3);
 		Capsule->SetCollisionResponseToChannel(ECC_GameTraceChannel3, ECR_Overlap);
 	}
+
+	if (USkeletalMeshComponent* MeshComp = GetMesh())
+	{
+		MeshComp->SetSimulatePhysics(false);
+		MeshComp->SetCollisionProfileName(TEXT("CharacterMesh"));
+		MeshComp->SetCollisionEnabled(ECollisionEnabled::QueryOnly);
+		MeshComp->SetCollisionResponseToChannel(ECC_Visibility, ECR_Block);
+		MeshComp->SetCollisionResponseToChannel(ECC_GameTraceChannel1, ECR_Block);
+		MeshComp->SetCollisionResponseToChannel(ECC_GameTraceChannel3, ECR_Overlap);
+	}
 }
 
 void AZombieCharacter::ApplyStatsRow(const FZombieStatsRow& StatsRow)
@@ -398,6 +408,11 @@ void AZombieCharacter::ZombieDeActivateSet()
 	StopSimpleStuckCheck();
 	DisableZombieActor();
 
+	if (AZombieManager* Manager = Cast<AZombieManager>(GetOwner()))
+	{
+		Manager->NotifyZombieDeactivated(this);
+	}
+
 	// The corpse mesh uses the Ragdoll object type. Explicitly ignore both the
 	// player Pawn channel and the custom Zombie channel while keeping world
 	// collision enabled so the body can still settle on the floor.
@@ -420,6 +435,7 @@ void AZombieCharacter::ZombieForceReturnToPool()
 {
 	GetWorldTimerManager().ClearTimer(DespawnTimerHandle);
 	GetWorldTimerManager().ClearTimer(QualityFailureRetryTimerHandle);
+	GetWorldTimerManager().ClearTimer(SpeedBoostTimerHandle);
 	StopSimpleStuckCheck();
 	DisableZombieActor();
 
@@ -429,15 +445,37 @@ void AZombieCharacter::ZombieForceReturnToPool()
 	}
 }
 
+void AZombieCharacter::PrepareZombiePoolIdleState()
+{
+	GetWorldTimerManager().ClearTimer(DespawnTimerHandle);
+	GetWorldTimerManager().ClearTimer(QualityFailureRetryTimerHandle);
+	GetWorldTimerManager().ClearTimer(SpeedBoostTimerHandle);
+	DisableZombieActor();
+
+	if (USkeletalMeshComponent* MeshComp = GetMesh())
+	{
+		MeshComp->bPauseAnims = true;
+		MeshComp->SetSimulatePhysics(false);
+		MeshComp->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+		MeshComp->SetCollisionResponseToAllChannels(ECR_Ignore);
+	}
+
+	SetActorHiddenInGame(true);
+	SetActorEnableCollision(false);
+}
+
 void AZombieCharacter::PrepareZombieActivation()
 {
 	GetWorldTimerManager().ClearTimer(DespawnTimerHandle);
 	GetWorldTimerManager().ClearTimer(QualityFailureRetryTimerHandle);
+	GetWorldTimerManager().ClearTimer(SpeedBoostTimerHandle);
 	StopSimpleStuckCheck();
 	if (USkeletalMeshComponent* MeshComp = GetMesh())
 	{
 		MeshComp->bPauseAnims = false;
 	}
+	ConfigureActiveCollision();
+
 	bIsZombieDeactivated = false;
 	bIsAttacking = false;
 	QualityTargetActor.Reset();
@@ -487,6 +525,35 @@ void AZombieCharacter::LaunchTowardActor(AActor* TargetActor)
 		(FVector::UpVector * ActivationLaunchUpStrength);
 
 	LaunchCharacter(LaunchVelocity, true, true);
+}
+
+void AZombieCharacter::ApplyTemporarySpeedBoost(float SpeedMultiplier, float Duration)
+{
+	if (bIsZombieDeactivated || SpeedMultiplier <= 1.0f || Duration <= 0.0f)
+	{
+		return;
+	}
+
+	if (UCharacterMovementComponent* MoveComp = GetCharacterMovement())
+	{
+		MoveComp->MaxWalkSpeed = speed * SpeedMultiplier;
+	}
+
+	GetWorldTimerManager().ClearTimer(SpeedBoostTimerHandle);
+	GetWorldTimerManager().SetTimer(
+		SpeedBoostTimerHandle,
+		this,
+		&AZombieCharacter::RestoreBaseMoveSpeed,
+		Duration,
+		false);
+}
+
+void AZombieCharacter::RestoreBaseMoveSpeed()
+{
+	if (UCharacterMovementComponent* MoveComp = GetCharacterMovement())
+	{
+		MoveComp->MaxWalkSpeed = speed;
+	}
 }
 
 void AZombieCharacter::OnSimpleMoveTargetReached()
@@ -936,9 +1003,11 @@ void AZombieCharacter::DisableZombieActor()
 	// dispatch OnMoveCompleted, which must not restart a dead zombie.
 	bIsZombieDeactivated = true;
 	GetWorldTimerManager().ClearTimer(QualityFailureRetryTimerHandle);
+	GetWorldTimerManager().ClearTimer(SpeedBoostTimerHandle);
 	StopSimpleStuckCheck();
 	bIsAttacking = false;
 	QualityTargetActor.Reset();
+	RestoreBaseMoveSpeed();
 
 	if (AZombieAIController* AICon = Cast<AZombieAIController>(GetController()))
 	{

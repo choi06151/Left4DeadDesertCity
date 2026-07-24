@@ -81,6 +81,9 @@ public:
 	/** Resets the pooled/dead state before ZombieActivateSet is dispatched. */
 	void PrepareZombieActivation();
 
+	/** Puts this actor into a hidden, non-interactive pool state without waiting for the death despawn timer. */
+	void PrepareZombiePoolIdleState();
+
 	UFUNCTION(BlueprintPure, Category = "Zombie|Event")
 	bool IsZombieDeactivated() const { return bIsZombieDeactivated; }
 
@@ -90,6 +93,9 @@ public:
 
 	UFUNCTION(BlueprintCallable, Category = "Zombie|Movement")
 	void LaunchTowardActor(AActor* TargetActor);
+
+	UFUNCTION(BlueprintCallable, Category = "Zombie|Movement")
+	void ApplyTemporarySpeedBoost(float SpeedMultiplier, float Duration);
 
 	void OnSimpleMoveTargetReached();
 	void OnSimpleMoveFinished(EPathFollowingResult::Type ResultCode);
@@ -117,11 +123,13 @@ protected:
 	void ResetRepeatedNavLinkTracking();
 	void DisableZombieActor();
 	void ResumeQualityChaseAfterNavLink();
+	void RestoreBaseMoveSpeed();
 	void OnDespawnTimerExpired();
 
 	FTimerHandle DespawnTimerHandle;
 	FTimerHandle SimpleStuckCheckTimerHandle;
 	FTimerHandle QualityFailureRetryTimerHandle;
+	FTimerHandle SpeedBoostTimerHandle;
 
 private:
 	UPROPERTY()

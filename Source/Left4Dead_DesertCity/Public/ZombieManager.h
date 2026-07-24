@@ -9,6 +9,54 @@
 class AZombieCharacter;
 class ATargetPoint;
 
+USTRUCT(BlueprintType)
+struct FZombieManagerDebugStats
+{
+	GENERATED_BODY()
+
+	UPROPERTY(BlueprintReadOnly, Category = "Zombie|Debug")
+	int32 CurrentWaveIndex = 0;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Zombie|Debug")
+	int32 DesiredActiveZombieCount = 0;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Zombie|Debug")
+	int32 WaveStartBurstCount = 0;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Zombie|Debug")
+	int32 WaveActivationBurstCount = 0;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Zombie|Debug")
+	int32 WaveRefillBatchSize = 0;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Zombie|Debug")
+	float WaveRefillInterval = 0.0f;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Zombie|Debug")
+	int32 ActiveZombieCount = 0;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Zombie|Debug")
+	int32 CurrentSpawnedZombieCount = 0;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Zombie|Debug")
+	int32 TotalPooledZombieCount = 0;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Zombie|Debug")
+	int32 MaxPooledZombieCount = 0;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Zombie|Debug")
+	int32 WaitingPooledZombieCount = 0;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Zombie|Debug")
+	int32 HiddenPooledZombieCount = 0;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Zombie|Debug")
+	int32 AvailablePooledZombieCount = 0;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Zombie|Debug")
+	int32 DeactivatedAwaitingPoolCount = 0;
+};
+
 UCLASS()
 class LEFT4DEAD_DESERTCITY_API AZombieManager : public AActor
 {
@@ -65,19 +113,56 @@ public:
 	bool IsSpawnLocationReachableToPlayer(const FVector& CandidateLocation) const;
 	FVector GetSurroundSlotLocation(const AZombieCharacter* Zombie, const FVector& TargetCenter) const;
 
+	UFUNCTION(BlueprintPure, Category = "Zombie|Debug")
+	int32 GetActiveZombieCount() const;
+
+	UFUNCTION(BlueprintPure, Category = "Zombie|Debug")
+	int32 GetTotalPooledZombieCount() const;
+
+	UFUNCTION(BlueprintPure, Category = "Zombie|Debug")
+	int32 GetWaitingPooledZombieCount() const;
+
+	UFUNCTION(BlueprintPure, Category = "Zombie|Debug")
+	int32 GetHiddenPooledZombieCount() const;
+
+	UFUNCTION(BlueprintPure, Category = "Zombie|Debug")
+	int32 GetAvailablePooledZombieCount() const;
+
+	UFUNCTION(BlueprintPure, Category = "Zombie|Debug")
+	int32 GetDeactivatedAwaitingPoolCount() const;
+
+	UFUNCTION(BlueprintPure, Category = "Zombie|Debug")
+	int32 GetCurrentSpawnedZombieCount() const { return CurrentSpawnedZombieCount; }
+
+	UFUNCTION(BlueprintPure, Category = "Zombie|Debug")
+	int32 GetDesiredActiveZombieCount() const { return DesiredActiveZombieCount; }
+
+	UFUNCTION(BlueprintPure, Category = "Zombie|Debug")
+	FZombieManagerDebugStats GetZombieDebugStats() const;
+
+	void NotifyZombieDeactivated(AZombieCharacter* Zombie);
+
 private:
+	void SpawnZombieInternal(bool bLaunchOnActivation);
+	void EnsureZombiePoolSize(int32 DesiredPoolSize);
+	AZombieCharacter* TakeAvailablePooledZombie(bool bAllowForceRecycleDeactivated);
+	bool FindSpawnLocationAroundPlayer(AZombieCharacter* TargetZombie, FVector& OutSpawnLocation) const;
+	bool IsActiveZombie(const AZombieCharacter* Zombie) const;
+	bool IsAvailablePooledZombie(const AZombieCharacter* Zombie) const;
+	int32 TrimActiveZombiesToDesiredCount();
 	void ApplyMoveFocusToActiveZombies(bool bForceRequest);
+	void ApplyWaveSpeedBoostToActiveZombies();
 	void MaintainActorMoveFocus();
 	void ResumeNormalMovement(AZombieCharacter* Zombie);
 	FVector GetMoveFocusLocation() const;
-	void MaintainZombiePopulation();
-	int32 GetActiveZombieCount() const;
+	void MaintainZombiePopulation(int32 MaxSpawnCount = 1, bool bLaunchOnActivation = false);
 	int32 ResolveDesiredActiveZombieCount(int32 WaveIndex) const;
 	void SchedulePoolWarmup();
 	void WarmupZombiePool();
 	void CollectInitialSpawnTargetPoints();
+	void AdoptLevelPlacedZombies();
 	bool TrySpawnInitialWaitingZombie();
-	bool ActivateInitialWaitingZombie();
+	bool ActivateInitialWaitingZombie(bool bIgnoreActivationDistance = false);
 	bool ActivateZombie(AZombieCharacter* Zombie, bool bLaunchOnActivation);
 
 	
@@ -91,9 +176,13 @@ private:
 	UPROPERTY(VisibleInstanceOnly, BlueprintReadOnly, Category = "Zombie Setup", meta = (AllowPrivateAccess = "true"))
 	TArray<TObjectPtr<ATargetPoint>> InitialSpawnTargetPoints;
 
-	/** Initially placed zombies that are visible but have not joined a wave yet. */
+	/** Pooled zombies that are hidden until a wave places them around the player. */
 	UPROPERTY()
 	TArray<TWeakObjectPtr<AZombieCharacter>> InitialWaitingZombies;
+
+	/** Deactivated corpses waiting for their normal despawn timer. Oldest entries are recycled first if a wave needs bodies immediately. */
+	UPROPERTY()
+	TArray<TWeakObjectPtr<AZombieCharacter>> DeactivatedZombiesAwaitingPool;
 
 	int32 NextInitialSpawnTargetPointIndex = 0;
 
@@ -101,6 +190,8 @@ private:
 	APawn* Player;
 
 	FTimerHandle PoolWarmupTimerHandle;
+	float WaveRefillElapsedTime = 0.0f;
+	float LastManualSpawnRequestTime = -FLT_MAX;
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Zombie|Movement Focus", meta = (AllowPrivateAccess = "true"))
 	bool bZombieMoveFocusActive = false;
@@ -146,6 +237,28 @@ public:
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Zombie Wave")
 	int32 DesiredActiveZombieCount = 0;
 
+	/** Legacy burst setting kept for Blueprint compatibility; wave target count is resolved from CurrentWaveIndex. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Zombie Wave", meta = (ClampMin = "0"))
+	int32 WaveStartBurstCount = 10;
+
+	/** Number of zombies placed immediately when a wave starts. Remaining target count is refilled over time. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Zombie Wave", meta = (ClampMin = "0"))
+	int32 WaveActivationBurstCount = 10;
+
+	/** Seconds between wave refill batches after the initial activation burst. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Zombie Wave", meta = (ClampMin = "0.01"))
+	float WaveRefillInterval = 0.5f;
+
+	/** Number of zombies added on each wave refill tick while active count is below the wave target. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Zombie Wave", meta = (ClampMin = "1"))
+	int32 WaveRefillBatchSize = 3;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Zombie Wave", meta = (ClampMin = "1.0"))
+	float WaveSpeedBoostMultiplier = 1.5f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Zombie Wave", meta = (ClampMin = "0.0"))
+	float WaveSpeedBoostDuration = 3.0f;
+
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Zombie Setup", meta = (ClampMin = "0.01"))
 	float PoolWarmupInterval = 0.1f;
 
@@ -175,7 +288,7 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Zombie Surround")
 	FVector SurroundNavProjectionExtent = FVector(80.0f, 80.0f, 200.0f);
 	
-	UPROPERTY()
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Zombie|Debug", meta = (AllowPrivateAccess = "true"))
 	int32 CurrentSpawnedZombieCount = 0;
 	
 
